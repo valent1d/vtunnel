@@ -171,6 +171,86 @@ func TestDaemonStopCommand(t *testing.T) {
 	}
 }
 
+func TestServiceInstallWritesLaunchAgents(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+	stubLaunchdRunner(t, func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		t.Fatal("launchctl should not run with --no-start")
+		return nil, nil
+	})
+
+	cfg := config.Default()
+	cfg.Cloudflared.ConfigPath = filepath.Join(tempDir, ".cloudflared", "config.yml")
+	configPath, err := config.ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := executeCommand(
+		context.Background(),
+		"--config", configPath,
+		"service", "install",
+		"--vtunnel-bin", "/tmp/vtunnel",
+		"--cloudflared-bin", "/tmp/cloudflared",
+		"--no-start",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Installed vtunnel services:", "Services installed but not started.", "sh.vltn.vtunnel.daemon.plist", "sh.vltn.vtunnel.cloudflared.plist"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("service install output = %q, want %q", out, want)
+		}
+	}
+
+	daemonPlist := filepath.Join(tempDir, "Library", "LaunchAgents", "sh.vltn.vtunnel.daemon.plist")
+	cloudflaredPlist := filepath.Join(tempDir, "Library", "LaunchAgents", "sh.vltn.vtunnel.cloudflared.plist")
+	for _, path := range []string{daemonPlist, cloudflaredPlist} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "<key>RunAtLoad</key>") || !strings.Contains(string(data), "<key>KeepAlive</key>") {
+			t.Fatalf("plist %s = %q, want RunAtLoad and KeepAlive", path, string(data))
+		}
+	}
+}
+
+func TestServiceStatusShowsLaunchAgentState(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+	stubLaunchdRunner(t, func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "print" {
+			return []byte("state = running"), nil
+		}
+		return nil, nil
+	})
+
+	cfg := config.Default()
+	configPath, err := config.ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := executeCommand(context.Background(), "--config", configPath, "service", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"vtunnel services:", "vtunnel daemon: loaded", "cloudflared: loaded"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("service status output = %q, want %q", out, want)
+		}
+	}
+}
+
 func TestOnboardingCommandHelp(t *testing.T) {
 	out, err := executeCommand(context.Background(), "onboarding", "--help")
 	if err != nil {
@@ -1228,6 +1308,15 @@ func stubCloudflareKeychainToken(t *testing.T, token string, err error) {
 	}
 	t.Cleanup(func() {
 		readCloudflareTokenFromKeychain = previous
+	})
+}
+
+func stubLaunchdRunner(t *testing.T, runner func(context.Context, string, ...string) ([]byte, error)) {
+	t.Helper()
+	previous := launchdRunner
+	launchdRunner = runner
+	t.Cleanup(func() {
+		launchdRunner = previous
 	})
 }
 

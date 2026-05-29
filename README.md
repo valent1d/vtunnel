@@ -34,8 +34,9 @@ This is an early MVP. It currently supports:
 - optional Cloudflare API discovery via a token stored in macOS Keychain
 - wildcard DNS repair through the Cloudflare API or `cloudflared`
 - release metadata through `vtunnel --version`
+- macOS LaunchAgent installation for `vtunnel` and `cloudflared`
 
-Homebrew packaging is being prepared. Service installation is still future work.
+Homebrew packaging is available through the public tap.
 
 ## Development
 
@@ -192,6 +193,23 @@ Daemon controls:
 ```bash
 vtunnel daemon stop
 vtunnel daemon restart
+```
+
+Install vtunnel and cloudflared as macOS user services:
+
+```bash
+vtunnel service install
+vtunnel service status
+```
+
+This writes user LaunchAgents under `~/Library/LaunchAgents/` and starts both services with `launchctl`. The services restart automatically when you log in.
+
+Service controls:
+
+```bash
+vtunnel service start
+vtunnel service stop
+vtunnel service uninstall
 ```
 
 Optional Cloudflare API discovery:

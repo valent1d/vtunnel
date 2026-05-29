@@ -20,6 +20,11 @@ on:
         required: true
         default: false
         type: boolean
+      update_tap:
+        description: "Update valent1d/homebrew-vtunnel after publishing the release"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -67,8 +72,18 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.prerelease }}" == "true" ]]; then
             prerelease="true"
           fi
+          update_tap="true"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.update_tap }}" != "true" ]]; then
+            update_tap="false"
+          fi
+          draft="false"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.draft }}" == "true" ]]; then
+            draft="true"
+          fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
+          echo "update_tap=${update_tap}" >> "${GITHUB_OUTPUT}"
+          echo "draft=${draft}" >> "${GITHUB_OUTPUT}"
 
       - name: Test
         run: go test ./...
@@ -89,7 +104,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.version }}
-          DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+          DRAFT: ${{ steps.version.outputs.draft }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
         shell: bash
         run: |
@@ -108,3 +123,46 @@ jobs:
           else
             gh release create "${TAG}" dist/*.tar.gz dist/checksums.txt "${args[@]}"
           fi
+
+      - name: Check Homebrew tap token
+        if: steps.version.outputs.update_tap == 'true' && steps.version.outputs.draft != 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${HOMEBREW_TAP_TOKEN}" ]]; then
+            echo "::error::Missing repository secret HOMEBREW_TAP_TOKEN. Create a fine-grained GitHub token with Contents: Read and write on valent1d/homebrew-vtunnel."
+            exit 1
+          fi
+
+      - name: Checkout Homebrew tap
+        if: steps.version.outputs.update_tap == 'true' && steps.version.outputs.draft != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: valent1d/homebrew-vtunnel
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update Homebrew tap formula
+        if: steps.version.outputs.update_tap == 'true' && steps.version.outputs.draft != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          VTUNNEL_GITHUB_REPO: valent1d/vtunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scripts/render-homebrew-formula.sh "${VERSION}" homebrew-tap/Formula/vtunnel.rb
+          ruby -c homebrew-tap/Formula/vtunnel.rb
+
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/vtunnel.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew tap already up to date."
+            exit 0
+          fi
+          git commit -m "Update vtunnel ${VERSION}"
+          git push

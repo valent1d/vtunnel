@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,6 +29,7 @@ import (
 	"vtunnel/internal/config"
 	"vtunnel/internal/daemon"
 	"vtunnel/internal/httpui"
+	"vtunnel/internal/launchd"
 	"vtunnel/internal/onboarding"
 	onboardingtui "vtunnel/internal/onboarding/tui"
 	"vtunnel/internal/requestlog"
@@ -42,6 +44,8 @@ var (
 )
 
 var runHTTPUI = httpui.Run
+
+var launchdRunner = launchd.ExecRunner
 
 func Execute() error {
 	return NewRootCommand().Execute()
@@ -73,6 +77,7 @@ func NewRootCommand() *cobra.Command {
 		newOnboardingCommand(&configPath),
 		newCloudflareCommand(),
 		newCloudflaredCommand(),
+		newServiceCommand(&configPath),
 		newDaemonCommand(&configPath),
 	)
 
@@ -120,6 +125,7 @@ func printWelcome(out io.Writer) {
 	fmt.Fprintln(out, "  vtunnel http 3000 dev       Expose localhost:3000 as dev.<domain>")
 	fmt.Fprintln(out, "  vtunnel list                List active tunnels")
 	fmt.Fprintln(out, "  vtunnel logs dev            Show request logs")
+	fmt.Fprintln(out, "  vtunnel service install     Start vtunnel automatically at login")
 	fmt.Fprintln(out, "  vtunnel status              Show local status")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Run `vtunnel --help` for all commands.")
@@ -737,6 +743,261 @@ func newOnboardingCommand(configPath *string) *cobra.Command {
 			engine := newCLIOnboardingEngine(path, cfg)
 			return onboardingtui.Run(cmd.Context(), engine)
 		},
+	}
+}
+
+func newServiceCommand(configPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "service",
+		Short: "Install and manage macOS user services",
+	}
+	cmd.AddCommand(
+		newServiceInstallCommand(configPath),
+		newServiceStatusCommand(configPath),
+		newServiceStartCommand(configPath),
+		newServiceStopCommand(configPath),
+		newServiceUninstallCommand(configPath),
+	)
+	return cmd
+}
+
+func newServiceInstallCommand(configPath *string) *cobra.Command {
+	var vtunnelBin string
+	var cloudflaredBin string
+	var noStart bool
+
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install vtunnel and cloudflared as macOS LaunchAgents",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			manager, specs, err := serviceInstallContext(*configPath, vtunnelBin, cloudflaredBin)
+			if err != nil {
+				return err
+			}
+			if err := manager.Install(cmd.Context(), specs, !noStart); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Installed vtunnel services:")
+			printServicePaths(cmd.OutOrStdout(), manager, specs)
+			if noStart {
+				fmt.Fprintln(cmd.OutOrStdout(), "Services installed but not started.")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "Services started.")
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Run: vtunnel service status")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&vtunnelBin, "vtunnel-bin", "", "vtunnel binary path to use in the LaunchAgent")
+	cmd.Flags().StringVar(&cloudflaredBin, "cloudflared-bin", "", "cloudflared binary path to use in the LaunchAgent")
+	cmd.Flags().BoolVar(&noStart, "no-start", false, "write LaunchAgents without starting them")
+	return cmd
+}
+
+func newServiceStatusCommand(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show macOS LaunchAgent status",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			manager, specs, err := serviceRuntimeContext(*configPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "vtunnel services:")
+			for _, spec := range specs {
+				status := manager.Status(cmd.Context(), spec)
+				state := "not installed"
+				switch {
+				case status.Loaded:
+					state = "loaded"
+				case status.Exists:
+					state = "installed, stopped"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "  - %s: %s\n", spec.Name, state)
+				fmt.Fprintf(cmd.OutOrStdout(), "    label: %s\n", spec.Label)
+				fmt.Fprintf(cmd.OutOrStdout(), "    plist: %s\n", status.Path)
+			}
+			return nil
+		},
+	}
+}
+
+func newServiceStartCommand(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "start",
+		Short: "Start installed macOS LaunchAgents",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			manager, specs, err := serviceRuntimeContext(*configPath)
+			if err != nil {
+				return err
+			}
+			if err := manager.Start(cmd.Context(), specs); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Services started.")
+			return nil
+		},
+	}
+}
+
+func newServiceStopCommand(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop installed macOS LaunchAgents",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			manager, specs, err := serviceRuntimeContext(*configPath)
+			if err != nil {
+				return err
+			}
+			for _, spec := range specs {
+				if err := manager.Stop(cmd.Context(), []launchd.Spec{spec}); err != nil {
+					status := manager.Status(cmd.Context(), spec)
+					if status.Exists && !status.Loaded {
+						continue
+					}
+					return err
+				}
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Services stopped.")
+			return nil
+		},
+	}
+}
+
+func newServiceUninstallCommand(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall",
+		Short: "Stop and remove macOS LaunchAgents",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			manager, specs, err := serviceRuntimeContext(*configPath)
+			if err != nil {
+				return err
+			}
+			if err := manager.Uninstall(cmd.Context(), specs); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Services uninstalled.")
+			return nil
+		},
+	}
+}
+
+func serviceInstallContext(configPath string, vtunnelBin string, cloudflaredBin string) (launchd.Manager, []launchd.Spec, error) {
+	if runtime.GOOS != "darwin" {
+		return launchd.Manager{}, nil, errors.New("vtunnel service install is currently supported on macOS only")
+	}
+	if err := config.EnsureDirs(); err != nil {
+		return launchd.Manager{}, nil, err
+	}
+	path, cfg, err := loadServiceConfig(configPath)
+	if err != nil {
+		return launchd.Manager{}, nil, err
+	}
+	if vtunnelBin == "" {
+		vtunnelBin, err = resolveServiceBinary("vtunnel")
+		if err != nil {
+			return launchd.Manager{}, nil, err
+		}
+	}
+	if cloudflaredBin == "" {
+		cloudflaredBin, err = resolveServiceBinary("cloudflared")
+		if err != nil {
+			return launchd.Manager{}, nil, err
+		}
+	}
+	manager, err := launchd.New(launchdRunner)
+	if err != nil {
+		return launchd.Manager{}, nil, err
+	}
+	specs, err := serviceSpecs(manager.Home, cfg, path, vtunnelBin, cloudflaredBin)
+	if err != nil {
+		return launchd.Manager{}, nil, err
+	}
+	return manager, specs, nil
+}
+
+func serviceRuntimeContext(configPath string) (launchd.Manager, []launchd.Spec, error) {
+	if runtime.GOOS != "darwin" {
+		return launchd.Manager{}, nil, errors.New("vtunnel services are currently supported on macOS only")
+	}
+	path, cfg, err := loadServiceConfig(configPath)
+	if err != nil {
+		return launchd.Manager{}, nil, err
+	}
+	manager, err := launchd.New(launchdRunner)
+	if err != nil {
+		return launchd.Manager{}, nil, err
+	}
+	specs, err := serviceSpecs(manager.Home, cfg, path, "vtunnel", "cloudflared")
+	if err != nil {
+		return launchd.Manager{}, nil, err
+	}
+	return manager, specs, nil
+}
+
+func loadServiceConfig(configPath string) (string, config.Config, error) {
+	path := strings.TrimSpace(config.ExpandPath(configPath))
+	if path == "" {
+		var err error
+		path, err = config.ConfigPath()
+		if err != nil {
+			return "", config.Config{}, err
+		}
+	}
+	if !filepath.IsAbs(path) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", config.Config{}, err
+		}
+		path = abs
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return "", config.Config{}, err
+	}
+	return path, cfg, nil
+}
+
+func serviceSpecs(home string, cfg config.Config, configPath string, vtunnelBin string, cloudflaredBin string) ([]launchd.Spec, error) {
+	logsDir, err := config.LogsDir()
+	if err != nil {
+		return nil, err
+	}
+	cloudflaredConfigPath := config.ExpandPath(cfg.Cloudflared.ConfigPath)
+	if !filepath.IsAbs(cloudflaredConfigPath) {
+		abs, err := filepath.Abs(cloudflaredConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		cloudflaredConfigPath = abs
+	}
+	return []launchd.Spec{
+		launchd.VtunnelDaemonSpec(vtunnelBin, configPath, logsDir, home),
+		launchd.CloudflaredSpec(cloudflaredBin, cloudflaredConfigPath, logsDir, home),
+	}, nil
+}
+
+func resolveServiceBinary(name string) (string, error) {
+	path, err := exec.LookPath(name)
+	if err == nil && !strings.Contains(path, "/go-build") {
+		return path, nil
+	}
+	if name != "vtunnel" {
+		return "", fmt.Errorf("%s not found; install it first", name)
+	}
+	exe, exeErr := os.Executable()
+	if exeErr != nil {
+		return "", fmt.Errorf("find current vtunnel executable: %w", exeErr)
+	}
+	if strings.Contains(exe, "/go-build") {
+		return "", errors.New("vtunnel service install needs an installed vtunnel binary; run it from Homebrew or pass --vtunnel-bin")
+	}
+	return exe, nil
+}
+
+func printServicePaths(out io.Writer, manager launchd.Manager, specs []launchd.Spec) {
+	for _, spec := range specs {
+		fmt.Fprintf(out, "  - %s: %s\n", spec.Name, manager.PlistPath(spec))
 	}
 }
 
