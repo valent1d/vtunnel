@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"vtunnel/internal/config"
+	"vtunnel/internal/logrotate"
 	"vtunnel/internal/requestlog"
 	"vtunnel/internal/routes"
 )
@@ -59,6 +60,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.logger.Info("api listening", "addr", s.cfg.API.Listen)
 		errs <- listenAndServeLocal(apiServer)
 	}()
+	go s.runLogJanitor(runCtx)
 
 	select {
 	case <-runCtx.Done():
@@ -74,6 +76,35 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = proxyServer.Close()
 		_ = apiServer.Close()
 		return err
+	}
+}
+
+// logJanitorMaxBytes caps each *.log file the janitor manages.
+const logJanitorMaxBytes = 5 << 20 // 5 MiB
+
+// runLogJanitor periodically caps the *.log files in the logs directory so they
+// never grow without bound — cloudflared and launchd append to them for the
+// lifetime of a long-running tunnel.
+func (s *Server) runLogJanitor(ctx context.Context) {
+	logsDir, err := config.LogsDir()
+	if err != nil {
+		return
+	}
+	sweep := func() {
+		if _, err := logrotate.CapDir(logsDir, logJanitorMaxBytes); err != nil {
+			s.logger.Warn("log janitor failed", "dir", logsDir, "error", err)
+		}
+	}
+	sweep()
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
 	}
 }
 
