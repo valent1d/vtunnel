@@ -31,9 +31,10 @@ func TestRenderDashboard(t *testing.T) {
 			Path:     "/api/login",
 			Duration: 12 * time.Millisecond,
 		}},
-		Width: 110,
+		Width:  110,
+		Height: 40,
 	}))
-	for _, want := range []string{"vtunnel http", "Tunnels", "Details", "Logs", "Metrics", "web", "https://web.example.test", "/api/login"} {
+	for _, want := range []string{"vtunnel http", "Tunnels", "Overview", "Traffic", "Cloudflare edge", "Requests", "web", "https://web.example.test", "/api/login"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output does not contain %q:\n%s", want, output)
 		}
@@ -72,7 +73,7 @@ func TestModelCreateRoute(t *testing.T) {
 	model.subInput.SetValue("web")
 	model.domainInput.SetValue("example.test")
 
-	updated, cmd := model.Update(key("enter"))
+	updated, cmd := model.Update(press("enter"))
 	if cmd == nil {
 		t.Fatal("expected create command")
 	}
@@ -111,13 +112,13 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 	model.logs = client.logs
 	model.focus = focusLogs
 
-	updated, _ := model.Update(key("down"))
+	updated, _ := model.Update(press("down"))
 	model = updated.(Model)
-	if model.logSelected != 1 {
-		t.Fatalf("logSelected = %d", model.logSelected)
+	if model.logCursor != 1 {
+		t.Fatalf("logCursor = %d, want 1", model.logCursor)
 	}
 
-	updated, _ = model.Update(key("enter"))
+	updated, _ = model.Update(press("enter"))
 	model = updated.(Model)
 	if model.mode != modeRequestDetail {
 		t.Fatalf("mode = %v, want request detail", model.mode)
@@ -128,7 +129,37 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 	}
 }
 
-func key(value string) tea.KeyPressMsg {
+func TestLogScrollMovesPastVisibleWindow(t *testing.T) {
+	cfg := config.Default()
+	client := &fakeClient{routes: []routes.Route{{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}}}
+	for i := 0; i < 50; i++ {
+		client.logs = append(client.logs, requestlog.Entry{
+			ID: uint64(i + 1), Hostname: "web.example.test", Method: "GET", Status: 200, Path: fmt.Sprintf("/p%d", i),
+		})
+	}
+	model := NewModel(client, cfg, "web.example.test")
+	model.routes = client.routes
+	model.syncSelection()
+	model.logs = client.logs
+	model.focus = focusLogs
+	model.logCursor = 0
+	model.logFollow = false
+
+	// Press down well past one visible window — the old code clamped the cursor
+	// inside a fixed 12-row window and never scrolled.
+	for i := 0; i < 30; i++ {
+		updated, _ := model.Update(press("down"))
+		model = updated.(Model)
+	}
+	if model.logCursor != 30 {
+		t.Fatalf("logCursor = %d after 30 downs, want 30 (scroll must advance past the window)", model.logCursor)
+	}
+	if out := ansi.Strip(model.View().Content); !strings.Contains(out, "/p30") {
+		t.Fatalf("scrolled window should show the cursor entry /p30:\n%s", out)
+	}
+}
+
+func press(value string) tea.KeyPressMsg {
 	switch value {
 	case "enter":
 		return tea.KeyPressMsg{Code: tea.KeyEnter}

@@ -5,9 +5,11 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/help"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"vtunnel/internal/cloudflared"
 	"vtunnel/internal/requestlog"
 	"vtunnel/internal/routes"
 )
@@ -20,8 +22,7 @@ func (m Model) View() tea.View {
 		Routes:        m.routes,
 		Logs:          m.logs,
 		Selected:      m.selected,
-		LogOffset:     m.logOffset,
-		LogSelected:   m.logSelected,
+		LogCursor:     m.logCursor,
 		Focus:         m.focus,
 		Mode:          m.mode,
 		CreateStep:    m.createStep,
@@ -34,6 +35,9 @@ func (m Model) View() tea.View {
 		Height:        m.height,
 		SelectedRoute: selectedRoute(m.routes, m.selected),
 		ConfirmCancel: m.confirmCancel,
+		HelpExpanded:  m.helpExpanded,
+		Edge:          m.edge,
+		Now:           time.Now(),
 	})}
 }
 
@@ -41,8 +45,7 @@ type Snapshot struct {
 	Routes        []routes.Route
 	Logs          []requestlog.Entry
 	Selected      int
-	LogOffset     int
-	LogSelected   int
+	LogCursor     int
 	Focus         focus
 	Mode          mode
 	CreateStep    int
@@ -55,6 +58,9 @@ type Snapshot struct {
 	Height        int
 	SelectedRoute routes.Route
 	ConfirmCancel bool
+	HelpExpanded  bool
+	Edge          cloudflared.EdgeStatus
+	Now           time.Time
 }
 
 func Render(snapshot Snapshot) string {
@@ -71,24 +77,33 @@ func Render(snapshot Snapshot) string {
 		height = 24
 	}
 
+	helpBar := help.New()
+	helpBar.ShowAll = snapshot.HelpExpanded
+	helpBar.SetWidth(contentWidth)
+	helpView := helpBar.View(keys)
+	// Reserve rows for the page padding, header, blank line and the help bar,
+	// plus a row of slack, so the command bar is never clipped off the bottom.
+	availableRows := max(12, height-6-strings.Count(helpView, "\n"))
+
 	var base []string
 	base = append(base, renderHeader(snapshot, contentWidth))
 
 	if contentWidth >= 92 {
 		leftWidth := 38
 		rightWidth := contentWidth - leftWidth - 2
-		logRows := max(7, height-18)
-		leftRows := logRows + 10
+		right := renderRightPane(snapshot, rightWidth, availableRows)
+		// Size the tunnel sidebar to the right pane's height so the columns align.
+		leftRows := max(0, strings.Count(right, "\n")-1)
 		base = append(base, lipgloss.JoinHorizontal(
 			lipgloss.Top,
 			renderTunnelList(snapshot, leftWidth, leftRows),
 			"  ",
-			renderRightPane(snapshot, rightWidth, logRows),
+			right,
 		))
 	} else {
-		base = append(base, renderTunnelList(snapshot, contentWidth, 0))
-		base = append(base, "")
-		base = append(base, renderRightPane(snapshot, contentWidth, 8))
+		sidebar := renderTunnelList(snapshot, contentWidth, 0)
+		base = append(base, sidebar, "")
+		base = append(base, renderRightPane(snapshot, contentWidth, max(8, availableRows-strings.Count(sidebar, "\n")-1)))
 	}
 
 	lines := strings.Split(strings.Join(base, "\n"), "\n")
@@ -101,16 +116,22 @@ func Render(snapshot Snapshot) string {
 	if snapshot.Mode == modeRequestDetail {
 		lines = overlayCentered(lines, renderRequestDetail(snapshot, modalWidth(contentWidth)), contentWidth)
 	}
-	if snapshot.Mode == modeHelp {
-		lines = overlayCentered(lines, renderHelp(modalWidth(contentWidth)), contentWidth)
-	}
 	if snapshot.Notice != "" {
 		lines = append(lines, "", okStyle.Render(snapshot.Notice))
 	}
 	if snapshot.Error != "" {
 		lines = append(lines, "", actionStyle.Render(snapshot.Error))
 	}
-	lines = append(lines, "", footerStyle.Render("(http) ↑/↓ navigate   n new   s stop   c url   r refresh   ? help   q quit"))
+	lines = append(lines, "", helpView)
+	// Safety net: if the content still exceeds the screen, clip from the bottom
+	// of the panes (the request list scrolls anyway) so the command bar — the
+	// last lines — is never pushed off-screen. pageStyle adds a padding row top
+	// and bottom, hence height-2.
+	if budget := height - 2; len(lines) > budget {
+		footerKeep := 2 + strings.Count(helpView, "\n") // blank separator + help bar rows
+		footer := lines[len(lines)-footerKeep:]
+		lines = append(lines[:max(1, budget-footerKeep)], footer...)
+	}
 	return pageStyle.Render(strings.Join(lines, "\n"))
 }
 
@@ -151,26 +172,95 @@ func renderTunnelList(snapshot Snapshot, width int, minRows int) string {
 	return renderBox(fmt.Sprintf("Tunnels (%d)", len(snapshot.Routes)), strings.Join(padRows(lines, minRows), "\n"), width)
 }
 
-func renderRightPane(snapshot Snapshot, width int, logRows int) string {
-	return lipgloss.JoinVertical(
+func renderRightPane(snapshot Snapshot, width int, availableRows int) string {
+	route := snapshot.SelectedRoute
+	// One bucket per displayed column, 1s each: the chart shows the last N seconds.
+	chartWidth := max(10, width-2)
+	stats := computeStats(snapshot.Logs, route.CreatedAt, snapshot.Now, chartWidth, time.Second)
+	top := lipgloss.JoinVertical(
 		lipgloss.Left,
-		renderDetails(snapshot.SelectedRoute, width),
+		renderHero(route, stats, snapshot.Edge, width),
 		"",
-		renderLogs(snapshot, width, logRows),
+		renderOverview(stats, snapshot.Edge, width),
 		"",
-		renderMetrics(snapshot.Logs, width),
+		renderTraffic(stats, width),
+		"",
+		renderEdge(snapshot.Edge, width),
 	)
+	// The request list takes whatever height remains below the cards (1 blank
+	// separator + 2 box borders), so the pane fits exactly in availableRows.
+	logRows := availableRows - (strings.Count(top, "\n") + 1) - 3
+	if logRows < 3 {
+		logRows = 3
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, top, "", renderLogs(snapshot, width, logRows))
 }
 
-func renderDetails(route routes.Route, width int) string {
+func renderHero(route routes.Route, stats Stats, edge cloudflared.EdgeStatus, width int) string {
 	if route.Hostname == "" {
-		return renderBox("Details", mutedStyle.Render("Select or create a tunnel."), width)
+		return renderBox("Tunnel", mutedStyle.Render("Select a tunnel, or press n to expose a local port."), width)
 	}
-	body := strings.Join([]string{
-		fmt.Sprintf("Destination: %s", commandStyle.Render(route.Target)),
-		fmt.Sprintf("Public URL:  %s", commandStyle.Render("https://"+route.Hostname)),
-	}, "\n")
-	return renderBox("Details", body, width)
+	url := commandStyle.Render("https://" + route.Hostname)
+	meta := okStyle.Render("● live")
+	if stats.Uptime > 0 {
+		meta += mutedStyle.Render("  ·  up " + formatUptime(stats.Uptime))
+	}
+	if n := len(edge.Connections); n > 0 {
+		meta += mutedStyle.Render(fmt.Sprintf("  ·  %d edge%s", n, plural(n)))
+	}
+	if edge.Version != "" {
+		meta += mutedStyle.Render("  ·  cloudflared " + edge.Version)
+	}
+	body := url + mutedStyle.Render("  →  ") + commandStyle.Render(route.Target) + "\n" + meta
+	return renderBox(route.Hostname, body, width)
+}
+
+func renderOverview(stats Stats, edge cloudflared.EdgeStatus, width int) string {
+	errValue := fmt.Sprintf("%d", stats.Errors)
+	if stats.Total > 0 && stats.Errors > 0 {
+		errValue = warnStyle.Render(fmt.Sprintf("%d (%.1f%%)", stats.Errors, stats.errorRate()*100))
+	}
+	line1 := strings.Join([]string{
+		mutedStyle.Render("Requests ") + humanCount(stats.Total),
+		mutedStyle.Render("Errors ") + errValue,
+		mutedStyle.Render("p95 ") + formatLatency(stats.P95),
+		mutedStyle.Render("Sent ") + humanBytes(stats.BytesSent),
+	}, mutedStyle.Render("   ·   "))
+	line2 := mutedStyle.Render("Codes  ") + fmt.Sprintf("2xx %d  3xx %d  4xx %d  5xx %d",
+		stats.ClassCounts[2], stats.ClassCounts[3], stats.ClassCounts[4], stats.ClassCounts[5])
+	return renderBox("Overview", line1+"\n"+line2, width)
+}
+
+func renderTraffic(stats Stats, width int) string {
+	title := fmt.Sprintf("Traffic · last %ds · peak %d/s", len(stats.Buckets), stats.PeakBucket)
+	bar := sparkline(stats.Buckets)
+	style := okStyle
+	if stats.Errors > 0 {
+		style = warnStyle
+	}
+	body := style.Render(bar)
+	if stats.PeakBucket == 0 {
+		body = mutedStyle.Render("no traffic in the last " + fmt.Sprintf("%ds", len(stats.Buckets)))
+	}
+	return renderBox(title, body, width)
+}
+
+func renderEdge(edge cloudflared.EdgeStatus, width int) string {
+	title := "Cloudflare edge"
+	if len(edge.Connections) == 0 {
+		return renderBox(title, mutedStyle.Render("Connecting…  (edge locations appear once cloudflared connects)"), width)
+	}
+	title = fmt.Sprintf("Cloudflare edge (%d)", len(edge.Connections))
+	lines := make([]string, 0, len(edge.Connections))
+	for _, c := range edge.Connections {
+		city := c.City
+		if city == "" {
+			city = c.Location
+		}
+		line := okStyle.Render("●") + fmt.Sprintf(" %-7s %-13s %s", c.Location, city, mutedStyle.Render(c.Protocol))
+		lines = append(lines, truncate(line, width-4))
+	}
+	return renderBox(title, strings.Join(lines, "\n"), width)
 }
 
 func renderLogs(snapshot Snapshot, width int, rows int) string {
@@ -179,44 +269,32 @@ func renderLogs(snapshot Snapshot, width int, rows int) string {
 	if len(logs) == 0 {
 		return renderBox(logTitle(route), strings.Join(padRows([]string{mutedStyle.Render("Waiting for requests...")}, rows), "\n"), width)
 	}
-	start := clamp(snapshot.LogOffset, 0, max(0, len(logs)-1))
-	if start > max(0, len(logs)-rows) {
-		start = max(0, len(logs)-rows)
+	n := len(logs)
+	cursor := clamp(snapshot.LogCursor, 0, n-1)
+	// Scroll the window to keep the cursor visible, preferring it at the bottom
+	// (chronological: oldest at top, newest — the live tail — at the bottom).
+	start := 0
+	if n > rows {
+		start = clamp(cursor-rows+1, 0, n-rows)
 	}
-	end := min(len(logs), start+rows)
+	end := min(n, start+rows)
 	lines := make([]string, 0, end-start)
-	for index, entry := range logs[start:end] {
+	for i := start; i < end; i++ {
+		entry := logs[i]
 		prefix := " "
-		if snapshot.Focus == focusLogs && index == snapshot.LogSelected {
-			prefix = ">"
-		}
-		line := fmt.Sprintf("%-5s %3d %-36s %8s", entry.Method, entry.Status, entry.Path, entry.Duration.Round(time.Millisecond))
 		style := statusColor(entry.Status)
-		if snapshot.Focus == focusLogs && index == snapshot.LogSelected {
+		if snapshot.Focus == focusLogs && i == cursor {
+			prefix = ">"
 			style = selectedRowStyle
 		}
+		line := fmt.Sprintf("%-5s %3d %-36s %8s", entry.Method, entry.Status, entry.Path, entry.Duration.Round(time.Millisecond))
 		lines = append(lines, style.Render(truncate(prefix+" "+line, width-4)))
 	}
 	title := logTitle(route)
-	if len(logs) > rows {
-		title += fmt.Sprintf(" %d-%d/%d", start+1, end, len(logs))
+	if n > rows {
+		title += fmt.Sprintf(" %d-%d/%d", start+1, end, n)
 	}
 	return renderBox(title, strings.Join(padRows(lines, rows), "\n"), width)
-}
-
-func renderMetrics(logs []requestlog.Entry, width int) string {
-	total, codes := metrics(logs)
-	errors := codes[4] + codes[5]
-	health := okStyle.Render("healthy")
-	if errors > 0 {
-		health = warnStyle.Render("has errors")
-	}
-	body := strings.Join([]string{
-		fmt.Sprintf("Requests: %-6d Errors: %-4d Active: %-4d Health: %s", total, errors, 1, health),
-		fmt.Sprintf("Status Codes: 2xx:%d   3xx:%d   4xx:%d   5xx:%d", codes[2], codes[3], codes[4], codes[5]),
-		"Traffic: " + trafficBar(total, errors),
-	}, "\n")
-	return renderBox("Metrics", body, width)
 }
 
 func renderCreateForm(snapshot Snapshot, width int) string {
@@ -274,24 +352,6 @@ func renderRequestDetail(snapshot Snapshot, width int) string {
 		mutedStyle.Render("enter/esc close"),
 	}, "\n")
 	return renderBox("Request detail", body, width)
-}
-
-func renderHelp(width int) string {
-	body := strings.Join([]string{
-		"↑/↓ or j/k      Navigate focused pane",
-		"tab             Switch focus between tunnels and logs",
-		"enter           Open selected request detail",
-		"pgup/pgdown     Scroll logs faster",
-		"home/end         Jump logs start/end",
-		"n               Create a tunnel",
-		"s               Stop selected tunnel",
-		"c               Copy public URL",
-		"r               Refresh",
-		"q               Quit",
-		"",
-		mutedStyle.Render("enter/esc close"),
-	}, "\n")
-	return renderBox("Help", body, width)
 }
 
 func overlayCentered(lines []string, modal string, width int) []string {
@@ -379,18 +439,9 @@ func renderBox(title string, body string, width int) string {
 
 func logTitle(route routes.Route) string {
 	if route.Hostname == "" {
-		return "Logs"
+		return "Requests"
 	}
-	return "Logs: " + routeName(route.Hostname)
-}
-
-func metrics(logs []requestlog.Entry) (int, map[int]int) {
-	codes := map[int]int{}
-	for _, entry := range logs {
-		class := entry.Status / 100
-		codes[class]++
-	}
-	return len(logs), codes
+	return "Requests: " + routeName(route.Hostname)
 }
 
 func statusColor(status int) lipgloss.Style {
@@ -417,7 +468,7 @@ func selectedLog(snapshot Snapshot) (requestlog.Entry, bool) {
 	if len(snapshot.Logs) == 0 {
 		return requestlog.Entry{}, false
 	}
-	index := clamp(snapshot.LogOffset+snapshot.LogSelected, 0, len(snapshot.Logs)-1)
+	index := clamp(snapshot.LogCursor, 0, len(snapshot.Logs)-1)
 	return snapshot.Logs[index], true
 }
 
@@ -461,23 +512,65 @@ func padRight(value string, width int) string {
 	return value + strings.Repeat(" ", gap)
 }
 
-func trafficBar(total int, errors int) string {
-	if total == 0 {
-		return mutedStyle.Render("░░░░░░░░░░")
+func humanCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
 	}
-	good := total - errors
-	if good < 0 {
-		good = 0
+}
+
+func humanBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
 	}
-	filled := good * 10 / total
-	if filled < 1 && good > 0 {
-		filled = 1
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
 	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", 10-filled)
-	if errors > 0 {
-		return warnStyle.Render(bar)
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGT"[exp])
+}
+
+func formatLatency(d time.Duration) string {
+	if d == 0 {
+		return "—"
 	}
-	return okStyle.Render(bar)
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Round(time.Millisecond)/time.Millisecond)
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
+func formatUptime(d time.Duration) string {
+	d = d.Round(time.Second)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		if m := int(d.Minutes()) % 60; m != 0 {
+			return fmt.Sprintf("%dh%dm", int(d.Hours()), m)
+		}
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		if h := int(d.Hours()) % 24; h != 0 {
+			return fmt.Sprintf("%dd%dh", int(d.Hours())/24, h)
+		}
+		return fmt.Sprintf("%dd", int(d.Hours())/24)
+	}
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func clamp(value int, minValue int, maxValue int) int {
