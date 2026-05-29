@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"vtunnel/internal/config"
 	"vtunnel/internal/requestlog"
@@ -21,7 +22,7 @@ func TestRenderDashboard(t *testing.T) {
 		Target:    "http://127.0.0.1:3000",
 		CreatedAt: time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC),
 	}
-	output := Render(Snapshot{
+	output := ansi.Strip(Render(Snapshot{
 		Routes:        []routes.Route{route},
 		SelectedRoute: route,
 		Logs: []requestlog.Entry{{
@@ -31,7 +32,7 @@ func TestRenderDashboard(t *testing.T) {
 			Duration: 12 * time.Millisecond,
 		}},
 		Width: 110,
-	})
+	}))
 	for _, want := range []string{"vtunnel http", "Tunnels", "Details", "Logs", "Metrics", "web", "https://web.example.test", "/api/login"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output does not contain %q:\n%s", want, output)
@@ -121,17 +122,21 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 	if model.mode != modeRequestDetail {
 		t.Fatalf("mode = %v, want request detail", model.mode)
 	}
-	output := model.View()
+	output := ansi.Strip(model.View().Content)
 	if !strings.Contains(output, "Request detail") {
 		t.Fatalf("output does not contain request detail:\n%s", output)
 	}
 }
 
-func key(value string) tea.KeyMsg {
-	if value == "enter" {
-		return tea.KeyMsg{Type: tea.KeyEnter}
+func key(value string) tea.KeyPressMsg {
+	switch value {
+	case "enter":
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	case "down":
+		return tea.KeyPressMsg{Code: tea.KeyDown}
+	default:
+		return tea.KeyPressMsg{Code: []rune(value)[0], Text: value}
 	}
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)}
 }
 
 type fakeClient struct {

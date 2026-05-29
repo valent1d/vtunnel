@@ -3,13 +3,12 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"vtunnel/internal/onboarding"
 )
@@ -38,6 +37,7 @@ type Model struct {
 	quitting      bool
 	finished      bool
 	actionRunning bool
+	confirmCancel bool
 
 	domainManager       bool
 	domainIndex         int
@@ -62,7 +62,6 @@ type actionMsg struct {
 func Run(ctx context.Context, engine *onboarding.Engine) error {
 	program := tea.NewProgram(
 		NewModel(engine),
-		tea.WithAltScreen(),
 		tea.WithContext(ctx),
 	)
 	final, err := program.Run()
@@ -70,7 +69,9 @@ func Run(ctx context.Context, engine *onboarding.Engine) error {
 		return err
 	}
 	if model, ok := final.(Model); ok && model.finished {
-		fmt.Fprint(os.Stdout, model.farewell())
+		// lipgloss.Writer wraps os.Stdout and downsamples colors to the
+		// terminal's profile (and respects NO_COLOR / non-TTY output).
+		fmt.Fprint(lipgloss.Writer, model.farewell())
 	}
 	return nil
 }
@@ -103,7 +104,7 @@ func (m Model) farewell() string {
 func NewModel(engine engine) Model {
 	input := textinput.New()
 	input.CharLimit = 256
-	input.Width = 56
+	input.SetWidth(56)
 	return Model{
 		engine: engine,
 		width:  96,
@@ -131,7 +132,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bootDoneMsg:
 		m.bootDone = true
 		return m, nil
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.inputAction != nil {
 			return m.updateInput(msg)
 		}
@@ -210,6 +211,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.err = ""
 				if action.ID == "open-token-url" {
 					m.confirming = true
+					m.confirmCancel = false
 				}
 				return m, nil
 			}
@@ -221,6 +223,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.confirming = true
+			m.confirmCancel = false
 			return m, nil
 		case "r":
 			return m, m.fetch()
@@ -253,10 +256,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "left", "h", "right", "l", "tab":
+		m.confirmCancel = !m.confirmCancel
+		return m, nil
 	case "esc", "n":
 		m.confirming = false
 		return m, nil
-	case "y", "enter":
+	case "enter":
+		if m.confirmCancel {
+			m.confirming = false
+			return m, nil
+		}
+		fallthrough
+	case "y":
 		action, ok := selectedAction(currentActions(m.report, m.stepIndex), m.actionIndex)
 		if !ok {
 			m.confirming = false
@@ -343,6 +355,7 @@ func (m Model) updateDomainManager(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.domainConfirmAction = "remove-domain"
 		m.domainConfirmValue = state.domains[m.domainIndex]
+		m.confirmCancel = true
 		return m, nil
 	}
 	return m, nil
@@ -350,11 +363,21 @@ func (m Model) updateDomainManager(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateDomainConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "left", "h", "right", "l", "tab":
+		m.confirmCancel = !m.confirmCancel
+		return m, nil
 	case "esc", "n":
 		m.domainConfirmAction = ""
 		m.domainConfirmValue = ""
 		return m, nil
-	case "y", "enter":
+	case "enter":
+		if m.confirmCancel {
+			m.domainConfirmAction = ""
+			m.domainConfirmValue = ""
+			return m, nil
+		}
+		fallthrough
+	case "y":
 		action := onboarding.Action{ID: m.domainConfirmAction, Label: "Remove domain", Mutates: true}
 		value := m.domainConfirmValue
 		m.actionRunning = true
@@ -408,6 +431,7 @@ func (m Model) updateTunnelManager(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.tunnelConfirmAction = "delete-tunnel"
 		m.tunnelConfirmValue = tunnel.id
+		m.confirmCancel = true
 		return m, nil
 	}
 	return m, nil
@@ -415,11 +439,21 @@ func (m Model) updateTunnelManager(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateTunnelConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "left", "h", "right", "l", "tab":
+		m.confirmCancel = !m.confirmCancel
+		return m, nil
 	case "esc", "n":
 		m.tunnelConfirmAction = ""
 		m.tunnelConfirmValue = ""
 		return m, nil
-	case "y", "enter":
+	case "enter":
+		if m.confirmCancel {
+			m.tunnelConfirmAction = ""
+			m.tunnelConfirmValue = ""
+			return m, nil
+		}
+		fallthrough
+	case "y":
 		action := onboarding.Action{ID: m.tunnelConfirmAction, Label: "Delete tunnel", Mutates: true}
 		value := m.tunnelConfirmValue
 		m.actionRunning = true
@@ -428,15 +462,16 @@ func (m Model) updateTunnelConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
 	if m.quitting {
-		return ""
+		return tea.NewView("")
 	}
-	return Render(Snapshot{
+	return tea.View{AltScreen: true, Content: Render(Snapshot{
 		Report:        m.report,
 		StepIndex:     m.stepIndex,
 		ActionIndex:   m.actionIndex,
 		Confirming:    m.confirming,
+		ConfirmCancel: m.confirmCancel,
 		InputAction:   m.inputAction,
 		InputValue:    m.input.View(),
 		DomainManager: m.domainManager,
@@ -454,7 +489,7 @@ func (m Model) View() string {
 		Height:        m.height,
 		Booting:       !m.bootDone,
 		BootFrame:     m.bootFrame,
-	})
+	})}
 }
 
 func (m Model) fetch() tea.Cmd {
@@ -494,6 +529,7 @@ type Snapshot struct {
 	StepIndex     int
 	ActionIndex   int
 	Confirming    bool
+	ConfirmCancel bool
 	InputAction   *onboarding.Action
 	InputValue    string
 	DomainManager bool
@@ -889,17 +925,46 @@ func renderAction(action onboarding.Action, selected bool, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+// confirmButtons renders a Confirm/Cancel button pair, highlighting the focused
+// one. The focused button uses the brand-green active style; the other is muted.
+func confirmButtons(confirmLabel, cancelLabel string, cancelFocused bool) string {
+	confirm, cancel := buttonStyle.Render(confirmLabel), buttonStyle.Render(cancelLabel)
+	if cancelFocused {
+		cancel = activeButtonStyle.Render(cancelLabel)
+	} else {
+		confirm = activeButtonStyle.Render(confirmLabel)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, confirm, "   ", cancel)
+}
+
+// renderConfirmDialog builds a centered confirmation modal with action buttons.
+func renderConfirmDialog(title, question, note, confirmLabel, cancelLabel string, cancelFocused bool, width int) string {
+	inner := max(12, width-2)
+	center := func(s string) string { return lipgloss.PlaceHorizontal(inner, lipgloss.Center, s) }
+	lines := []string{"", center(warnStyle.Render(question))}
+	if note != "" {
+		lines = append(lines, center(mutedStyle.Render(note)))
+	}
+	lines = append(lines,
+		"",
+		center(confirmButtons(confirmLabel, cancelLabel, cancelFocused)),
+		"",
+		center(footerStyle.Render("←/→ choose · enter select · esc cancel")),
+	)
+	return renderBlock(title, strings.Join(lines, "\n"), width)
+}
+
 func renderConfirm(snapshot Snapshot, width int) string {
 	action, ok := selectedAction(currentActions(snapshot.Report, snapshot.StepIndex), snapshot.ActionIndex)
-	title := "Confirm action"
-	detail := "y/enter confirm   n/esc cancel"
+	question := "Run this action?"
+	note := ""
 	if ok {
-		title = "Confirm: " + action.Label
+		question = action.Label + "?"
 		if action.Command != "" && !action.Mutates {
-			detail = action.Command + "\n" + detail
+			note = action.Command
 		}
 	}
-	return renderBlock("Confirmation", warnStyle.Render(title)+"\n"+mutedStyle.Render(detail), width)
+	return renderConfirmDialog("Confirmation", question, note, "Confirm", "Cancel", snapshot.ConfirmCancel, width)
 }
 
 func renderInput(snapshot Snapshot, width int) string {
@@ -937,7 +1002,8 @@ func renderDomainManager(snapshot Snapshot, width int) string {
 	lines = append(lines, "")
 	if snapshot.DomainConfirm {
 		lines = append(lines, actionStyle.Render("Remove "+snapshot.DomainTarget+"?"))
-		lines = append(lines, mutedStyle.Render("y/enter confirm   n/esc cancel"))
+		lines = append(lines, confirmButtons("Remove", "Cancel", snapshot.ConfirmCancel))
+		lines = append(lines, footerStyle.Render("←/→ choose · enter select · esc cancel"))
 	} else {
 		lines = append(lines, footerStyle.Render("up/down select   enter default   a add   r rename   x remove   esc close"))
 	}
@@ -971,7 +1037,8 @@ func renderTunnelManager(snapshot Snapshot, width int) string {
 	lines = append(lines, "")
 	if snapshot.TunnelConfirm {
 		lines = append(lines, actionStyle.Render("Delete "+snapshot.TunnelTarget+"?"))
-		lines = append(lines, mutedStyle.Render("y/enter confirm   n/esc cancel"))
+		lines = append(lines, confirmButtons("Delete", "Cancel", snapshot.ConfirmCancel))
+		lines = append(lines, footerStyle.Render("←/→ choose · enter select · esc cancel"))
 	} else {
 		lines = append(lines, footerStyle.Render("up/down select   enter use   a create   x delete   esc close"))
 	}
@@ -1523,4 +1590,7 @@ var (
 	actionBadgeStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
 	inputBadgeStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))
 	mutedBadgeStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
+
+	buttonStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("238")).Padding(0, 3)
+	activeButtonStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(lipgloss.Color("48")).Padding(0, 3)
 )

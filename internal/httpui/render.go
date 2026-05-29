@@ -5,17 +5,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"vtunnel/internal/requestlog"
 	"vtunnel/internal/routes"
 )
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
 	if m.quit {
-		return ""
+		return tea.NewView("")
 	}
-	return Render(Snapshot{
+	return tea.View{AltScreen: true, Content: Render(Snapshot{
 		Routes:        m.routes,
 		Logs:          m.logs,
 		Selected:      m.selected,
@@ -32,7 +33,8 @@ func (m Model) View() string {
 		Width:         m.width,
 		Height:        m.height,
 		SelectedRoute: selectedRoute(m.routes, m.selected),
-	})
+		ConfirmCancel: m.confirmCancel,
+	})}
 }
 
 type Snapshot struct {
@@ -52,6 +54,7 @@ type Snapshot struct {
 	Width         int
 	Height        int
 	SelectedRoute routes.Route
+	ConfirmCancel bool
 }
 
 func Render(snapshot Snapshot) string {
@@ -240,7 +243,16 @@ func renderConfirmStop(snapshot Snapshot, width int) string {
 	if host == "" {
 		host = "selected tunnel"
 	}
-	body := warnStyle.Render("Stop "+host+"?") + "\n" + mutedStyle.Render("y/enter stop   n/esc cancel")
+	inner := max(12, width-2)
+	center := func(s string) string { return lipgloss.PlaceHorizontal(inner, lipgloss.Center, s) }
+	body := strings.Join([]string{
+		"",
+		center(warnStyle.Render("Stop " + host + "?")),
+		"",
+		center(confirmButtons("Stop", "Cancel", snapshot.ConfirmCancel)),
+		"",
+		center(footerStyle.Render("←/→ choose · enter select · esc cancel")),
+	}, "\n")
 	return renderBox("Confirm", body, width)
 }
 
@@ -512,4 +524,18 @@ var (
 	warnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	actionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	commandStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
+
+	buttonStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("238")).Padding(0, 3)
+	activeButtonStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(lipgloss.Color("48")).Padding(0, 3)
 )
+
+// confirmButtons renders a Confirm/Cancel button pair, highlighting the focused one.
+func confirmButtons(confirmLabel, cancelLabel string, cancelFocused bool) string {
+	confirm, cancel := buttonStyle.Render(confirmLabel), buttonStyle.Render(cancelLabel)
+	if cancelFocused {
+		cancel = activeButtonStyle.Render(cancelLabel)
+	} else {
+		confirm = activeButtonStyle.Render(confirmLabel)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, confirm, "   ", cancel)
+}
