@@ -22,8 +22,7 @@ func (m Model) View() tea.View {
 		Routes:        m.routes,
 		Logs:          m.logs,
 		Selected:      m.selected,
-		LogOffset:     m.logOffset,
-		LogSelected:   m.logSelected,
+		LogCursor:     m.logCursor,
 		Focus:         m.focus,
 		Mode:          m.mode,
 		CreateStep:    m.createStep,
@@ -46,8 +45,7 @@ type Snapshot struct {
 	Routes        []routes.Route
 	Logs          []requestlog.Entry
 	Selected      int
-	LogOffset     int
-	LogSelected   int
+	LogCursor     int
 	Focus         focus
 	Mode          mode
 	CreateStep    int
@@ -271,27 +269,30 @@ func renderLogs(snapshot Snapshot, width int, rows int) string {
 	if len(logs) == 0 {
 		return renderBox(logTitle(route), strings.Join(padRows([]string{mutedStyle.Render("Waiting for requests...")}, rows), "\n"), width)
 	}
-	start := clamp(snapshot.LogOffset, 0, max(0, len(logs)-1))
-	if start > max(0, len(logs)-rows) {
-		start = max(0, len(logs)-rows)
+	n := len(logs)
+	cursor := clamp(snapshot.LogCursor, 0, n-1)
+	// Scroll the window to keep the cursor visible, preferring it at the bottom
+	// (chronological: oldest at top, newest — the live tail — at the bottom).
+	start := 0
+	if n > rows {
+		start = clamp(cursor-rows+1, 0, n-rows)
 	}
-	end := min(len(logs), start+rows)
+	end := min(n, start+rows)
 	lines := make([]string, 0, end-start)
-	for index, entry := range logs[start:end] {
+	for i := start; i < end; i++ {
+		entry := logs[i]
 		prefix := " "
-		if snapshot.Focus == focusLogs && index == snapshot.LogSelected {
-			prefix = ">"
-		}
-		line := fmt.Sprintf("%-5s %3d %-36s %8s", entry.Method, entry.Status, entry.Path, entry.Duration.Round(time.Millisecond))
 		style := statusColor(entry.Status)
-		if snapshot.Focus == focusLogs && index == snapshot.LogSelected {
+		if snapshot.Focus == focusLogs && i == cursor {
+			prefix = ">"
 			style = selectedRowStyle
 		}
+		line := fmt.Sprintf("%-5s %3d %-36s %8s", entry.Method, entry.Status, entry.Path, entry.Duration.Round(time.Millisecond))
 		lines = append(lines, style.Render(truncate(prefix+" "+line, width-4)))
 	}
 	title := logTitle(route)
-	if len(logs) > rows {
-		title += fmt.Sprintf(" %d-%d/%d", start+1, end, len(logs))
+	if n > rows {
+		title += fmt.Sprintf(" %d-%d/%d", start+1, end, n)
 	}
 	return renderBox(title, strings.Join(padRows(lines, rows), "\n"), width)
 }
@@ -467,7 +468,7 @@ func selectedLog(snapshot Snapshot) (requestlog.Entry, bool) {
 	if len(snapshot.Logs) == 0 {
 		return requestlog.Entry{}, false
 	}
-	index := clamp(snapshot.LogOffset+snapshot.LogSelected, 0, len(snapshot.Logs)-1)
+	index := clamp(snapshot.LogCursor, 0, len(snapshot.Logs)-1)
 	return snapshot.Logs[index], true
 }
 

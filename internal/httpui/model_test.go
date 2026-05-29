@@ -114,8 +114,8 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 
 	updated, _ := model.Update(press("down"))
 	model = updated.(Model)
-	if model.logSelected != 1 {
-		t.Fatalf("logSelected = %d", model.logSelected)
+	if model.logCursor != 1 {
+		t.Fatalf("logCursor = %d, want 1", model.logCursor)
 	}
 
 	updated, _ = model.Update(press("enter"))
@@ -126,6 +126,36 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 	output := ansi.Strip(model.View().Content)
 	if !strings.Contains(output, "Request detail") {
 		t.Fatalf("output does not contain request detail:\n%s", output)
+	}
+}
+
+func TestLogScrollMovesPastVisibleWindow(t *testing.T) {
+	cfg := config.Default()
+	client := &fakeClient{routes: []routes.Route{{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}}}
+	for i := 0; i < 50; i++ {
+		client.logs = append(client.logs, requestlog.Entry{
+			ID: uint64(i + 1), Hostname: "web.example.test", Method: "GET", Status: 200, Path: fmt.Sprintf("/p%d", i),
+		})
+	}
+	model := NewModel(client, cfg, "web.example.test")
+	model.routes = client.routes
+	model.syncSelection()
+	model.logs = client.logs
+	model.focus = focusLogs
+	model.logCursor = 0
+	model.logFollow = false
+
+	// Press down well past one visible window — the old code clamped the cursor
+	// inside a fixed 12-row window and never scrolled.
+	for i := 0; i < 30; i++ {
+		updated, _ := model.Update(press("down"))
+		model = updated.(Model)
+	}
+	if model.logCursor != 30 {
+		t.Fatalf("logCursor = %d after 30 downs, want 30 (scroll must advance past the window)", model.logCursor)
+	}
+	if out := ansi.Strip(model.View().Content); !strings.Contains(out, "/p30") {
+		t.Fatalf("scrolled window should show the cursor entry /p30:\n%s", out)
 	}
 }
 

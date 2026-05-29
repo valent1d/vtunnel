@@ -86,8 +86,8 @@ type Model struct {
 	selected         int
 	selectedHostname string
 	lastLogID        uint64
-	logOffset        int
-	logSelected      int
+	logCursor        int  // absolute index into logs (0 = oldest, len-1 = newest)
+	logFollow        bool // keep the cursor pinned to the newest request as logs stream in
 	focus            focus
 	width            int
 	height           int
@@ -179,6 +179,7 @@ func NewModel(client client, cfg config.Config, selectedHostname string) Model {
 		selectedHostname: routes.NormalizeHostname(selectedHostname),
 		width:            100,
 		height:           30,
+		logFollow:        true,
 		portInput:        portInput,
 		subInput:         subInput,
 		domainInput:      domainInput,
@@ -226,7 +227,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.logs = msg.logs
 		m.lastLogID = maxLogID(msg.logs)
-		m.clampLogState()
+		if m.logFollow {
+			m.logCursor = max(0, len(m.logs)-1)
+		} else {
+			m.logCursor = clamp(m.logCursor, 0, max(0, len(m.logs)-1))
+		}
 		m.err = ""
 		return m, nil
 	case createMsg:
@@ -238,8 +243,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedHostname = msg.hostname
 		m.mode = modeDashboard
 		m.focus = focusLogs
-		m.logOffset = 0
-		m.logSelected = 0
+		m.logCursor = 0
+		m.logFollow = true
 		return m, m.fetchRoutes()
 	case stopMsg:
 		if msg.err != nil {
@@ -279,21 +284,18 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Up):
 		return m.moveUp()
 	case key.Matches(msg, keys.PageDown):
-		m.logOffset = clamp(m.logOffset+10, 0, max(0, len(m.logs)-1))
-		m.clampLogState()
+		m.moveCursor(10)
 		return m, nil
 	case key.Matches(msg, keys.PageUp):
-		m.logOffset = clamp(m.logOffset-10, 0, max(0, len(m.logs)-1))
-		m.clampLogState()
+		m.moveCursor(-10)
 		return m, nil
 	case key.Matches(msg, keys.Home):
-		m.logOffset = 0
-		m.logSelected = 0
+		m.logCursor = 0
+		m.logFollow = false
 		return m, nil
 	case key.Matches(msg, keys.End):
-		m.logOffset = max(0, len(m.logs)-1)
-		m.logSelected = 0
-		m.clampLogState()
+		m.logCursor = max(0, len(m.logs)-1)
+		m.logFollow = true
 		return m, nil
 	case key.Matches(msg, keys.Refresh):
 		return m, m.fetchRoutes()
@@ -335,28 +337,38 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) moveDown() (tea.Model, tea.Cmd) {
 	if m.focus == focusLogs {
-		m.logSelected++
-		m.clampLogState()
+		m.moveCursor(1)
 		return m, nil
 	}
 	m.selected = clamp(m.selected+1, 0, len(m.routes)-1)
 	m.selectedHostname = m.currentHostname()
-	m.logOffset = 0
-	m.logSelected = 0
+	m.logCursor = 0
+	m.logFollow = true
 	return m, m.fetchLogs()
 }
 
 func (m Model) moveUp() (tea.Model, tea.Cmd) {
 	if m.focus == focusLogs {
-		m.logSelected--
-		m.clampLogState()
+		m.moveCursor(-1)
 		return m, nil
 	}
 	m.selected = clamp(m.selected-1, 0, len(m.routes)-1)
 	m.selectedHostname = m.currentHostname()
-	m.logOffset = 0
-	m.logSelected = 0
+	m.logCursor = 0
+	m.logFollow = true
 	return m, m.fetchLogs()
+}
+
+// moveCursor moves the request-list cursor by delta and toggles follow mode:
+// reaching the newest entry resumes auto-follow; moving up pauses it so the
+// view doesn't jump while the user is reading older requests.
+func (m *Model) moveCursor(delta int) {
+	if len(m.logs) == 0 {
+		m.logCursor = 0
+		return
+	}
+	m.logCursor = clamp(m.logCursor+delta, 0, len(m.logs)-1)
+	m.logFollow = m.logCursor >= len(m.logs)-1
 }
 
 func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -428,8 +440,8 @@ func (m *Model) syncSelection() {
 		m.selectedHostname = ""
 		m.logs = nil
 		m.lastLogID = 0
-		m.logOffset = 0
-		m.logSelected = 0
+		m.logCursor = 0
+		m.logFollow = true
 		return
 	}
 	if m.selectedHostname != "" {
@@ -442,17 +454,6 @@ func (m *Model) syncSelection() {
 	}
 	m.selected = clamp(m.selected, 0, len(m.routes)-1)
 	m.selectedHostname = m.routes[m.selected].Hostname
-}
-
-func (m *Model) clampLogState() {
-	if len(m.logs) == 0 {
-		m.logOffset = 0
-		m.logSelected = 0
-		return
-	}
-	m.logOffset = clamp(m.logOffset, 0, len(m.logs)-1)
-	visible := min(12, len(m.logs)-m.logOffset)
-	m.logSelected = clamp(m.logSelected, 0, max(0, visible-1))
 }
 
 func (m *Model) selectAfterStop(hostname string) {
