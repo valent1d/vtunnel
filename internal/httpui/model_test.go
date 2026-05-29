@@ -31,7 +31,8 @@ func TestRenderDashboard(t *testing.T) {
 			Path:     "/api/login",
 			Duration: 12 * time.Millisecond,
 		}},
-		Width: 110,
+		Width:  110,
+		Height: 40,
 	}))
 	for _, want := range []string{"vtunnel http", "Tunnels", "Overview", "Traffic", "Cloudflare edge", "Requests", "web", "https://web.example.test", "/api/login"} {
 		if !strings.Contains(output, want) {

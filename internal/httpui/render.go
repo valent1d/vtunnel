@@ -79,14 +79,21 @@ func Render(snapshot Snapshot) string {
 		height = 24
 	}
 
+	helpBar := help.New()
+	helpBar.ShowAll = snapshot.HelpExpanded
+	helpBar.SetWidth(contentWidth)
+	helpView := helpBar.View(keys)
+	// Reserve rows for the page padding, header, blank line and the help bar,
+	// plus a row of slack, so the command bar is never clipped off the bottom.
+	availableRows := max(12, height-6-strings.Count(helpView, "\n"))
+
 	var base []string
 	base = append(base, renderHeader(snapshot, contentWidth))
 
 	if contentWidth >= 92 {
 		leftWidth := 38
 		rightWidth := contentWidth - leftWidth - 2
-		logRows := max(4, height-26)
-		right := renderRightPane(snapshot, rightWidth, logRows)
+		right := renderRightPane(snapshot, rightWidth, availableRows)
 		// Size the tunnel sidebar to the right pane's height so the columns align.
 		leftRows := max(0, strings.Count(right, "\n")-1)
 		base = append(base, lipgloss.JoinHorizontal(
@@ -96,9 +103,9 @@ func Render(snapshot Snapshot) string {
 			right,
 		))
 	} else {
-		base = append(base, renderTunnelList(snapshot, contentWidth, 0))
-		base = append(base, "")
-		base = append(base, renderRightPane(snapshot, contentWidth, 6))
+		sidebar := renderTunnelList(snapshot, contentWidth, 0)
+		base = append(base, sidebar, "")
+		base = append(base, renderRightPane(snapshot, contentWidth, max(8, availableRows-strings.Count(sidebar, "\n")-1)))
 	}
 
 	lines := strings.Split(strings.Join(base, "\n"), "\n")
@@ -117,10 +124,16 @@ func Render(snapshot Snapshot) string {
 	if snapshot.Error != "" {
 		lines = append(lines, "", actionStyle.Render(snapshot.Error))
 	}
-	helpBar := help.New()
-	helpBar.ShowAll = snapshot.HelpExpanded
-	helpBar.SetWidth(contentWidth)
-	lines = append(lines, "", helpBar.View(keys))
+	lines = append(lines, "", helpView)
+	// Safety net: if the content still exceeds the screen, clip from the bottom
+	// of the panes (the request list scrolls anyway) so the command bar — the
+	// last lines — is never pushed off-screen. pageStyle adds a padding row top
+	// and bottom, hence height-2.
+	if budget := height - 2; len(lines) > budget {
+		footerKeep := 2 + strings.Count(helpView, "\n") // blank separator + help bar rows
+		footer := lines[len(lines)-footerKeep:]
+		lines = append(lines[:max(1, budget-footerKeep)], footer...)
+	}
 	return pageStyle.Render(strings.Join(lines, "\n"))
 }
 
@@ -161,12 +174,12 @@ func renderTunnelList(snapshot Snapshot, width int, minRows int) string {
 	return renderBox(fmt.Sprintf("Tunnels (%d)", len(snapshot.Routes)), strings.Join(padRows(lines, minRows), "\n"), width)
 }
 
-func renderRightPane(snapshot Snapshot, width int, logRows int) string {
+func renderRightPane(snapshot Snapshot, width int, availableRows int) string {
 	route := snapshot.SelectedRoute
 	// One bucket per displayed column, 1s each: the chart shows the last N seconds.
 	chartWidth := max(10, width-2)
 	stats := computeStats(snapshot.Logs, route.CreatedAt, snapshot.Now, chartWidth, time.Second)
-	return lipgloss.JoinVertical(
+	top := lipgloss.JoinVertical(
 		lipgloss.Left,
 		renderHero(route, stats, snapshot.Edge, width),
 		"",
@@ -175,9 +188,14 @@ func renderRightPane(snapshot Snapshot, width int, logRows int) string {
 		renderTraffic(stats, width),
 		"",
 		renderEdge(snapshot.Edge, width),
-		"",
-		renderLogs(snapshot, width, logRows),
 	)
+	// The request list takes whatever height remains below the cards (1 blank
+	// separator + 2 box borders), so the pane fits exactly in availableRows.
+	logRows := availableRows - (strings.Count(top, "\n") + 1) - 3
+	if logRows < 3 {
+		logRows = 3
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, top, "", renderLogs(snapshot, width, logRows))
 }
 
 func renderHero(route routes.Route, stats Stats, edge cloudflared.EdgeStatus, width int) string {
