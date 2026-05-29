@@ -20,7 +20,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/spf13/cobra"
 
 	"vtunnel/internal/api"
@@ -135,15 +136,24 @@ func printWelcome(out io.Writer) {
 }
 
 func brandWelcome() string {
-	return brandStyleCLI.Render(strings.TrimRight(`
-  _   __________  ___  ___  ________ 
- | | / /_  __/ / / / |/ / |/ / __/ / 
+	logo := strings.TrimRight(`
+  _   __________  ___  ___  ________
+ | | / /_  __/ / / / |/ / |/ / __/ /
  | |/ / / / / /_/ /    /    / _// /__
  |___/ /_/  \____/_/|_/_/|_/___/____/
-                                      `, "\n"))
+                                      `, "\n")
+	// lipgloss v2 always emits color codes; gate on the detected profile so the
+	// banner stays plain when stdout is not a color terminal (pipes, NO_COLOR).
+	if cliColorProfile < colorprofile.ANSI {
+		return logo
+	}
+	return brandStyleCLI.Render(logo)
 }
 
-var brandStyleCLI = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("48"))
+var (
+	brandStyleCLI   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("48"))
+	cliColorProfile = colorprofile.Detect(os.Stdout, os.Environ())
+)
 
 func newCloudflareCommand() *cobra.Command {
 	cmd := &cobra.Command{

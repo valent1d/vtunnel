@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"vtunnel/internal/api"
 	"vtunnel/internal/config"
@@ -47,9 +47,10 @@ type Model struct {
 	subInput    textinput.Model
 	domainInput textinput.Model
 
-	notice string
-	err    string
-	quit   bool
+	notice        string
+	err           string
+	quit          bool
+	confirmCancel bool
 }
 
 type mode int
@@ -95,7 +96,6 @@ type tickMsg time.Time
 func Run(ctx context.Context, cfg config.Config, selectedHostname string) error {
 	program := tea.NewProgram(
 		NewModel(api.New(cfg), cfg, selectedHostname),
-		tea.WithAltScreen(),
 		tea.WithContext(ctx),
 	)
 	_, err := program.Run()
@@ -106,17 +106,17 @@ func NewModel(client client, cfg config.Config, selectedHostname string) Model {
 	portInput := textinput.New()
 	portInput.Placeholder = "3000"
 	portInput.CharLimit = 5
-	portInput.Width = 12
+	portInput.SetWidth(12)
 
 	subInput := textinput.New()
 	subInput.Placeholder = "dev"
 	subInput.CharLimit = 63
-	subInput.Width = 24
+	subInput.SetWidth(24)
 
 	domainInput := textinput.New()
 	domainInput.Placeholder = cfg.DefaultDomain
 	domainInput.CharLimit = 253
-	domainInput.Width = 32
+	domainInput.SetWidth(32)
 
 	return Model{
 		client:           client,
@@ -140,7 +140,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch m.mode {
 		case modeCreate:
 			return m.updateCreate(msg)
@@ -249,6 +249,7 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mode = modeConfirmStop
+		m.confirmCancel = true // stopping is destructive: default to Cancel
 		return m, nil
 	case "c":
 		if host := m.currentHostname(); host != "" {
@@ -340,10 +341,19 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateConfirmStop(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "left", "h", "right", "l", "tab":
+		m.confirmCancel = !m.confirmCancel
+		return m, nil
 	case "esc", "n":
 		m.mode = modeDashboard
 		return m, nil
-	case "enter", "y":
+	case "enter":
+		if m.confirmCancel {
+			m.mode = modeDashboard
+			return m, nil
+		}
+		fallthrough
+	case "y":
 		hostname := m.currentHostname()
 		if hostname == "" {
 			m.mode = modeDashboard

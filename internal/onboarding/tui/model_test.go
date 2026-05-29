@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"vtunnel/internal/onboarding"
 )
@@ -309,11 +309,53 @@ func TestFinishOnLastStepQuitsAndRecaps(t *testing.T) {
 	}
 }
 
-func key(value string) tea.KeyMsg {
-	if value == "enter" {
-		return tea.KeyMsg{Type: tea.KeyEnter}
+func TestConfirmButtonsRespectFocus(t *testing.T) {
+	engine := &fakeEngine{
+		report: onboarding.Report{
+			Phases:  []onboarding.Phase{{Title: "Runtime"}},
+			Actions: []onboarding.Action{{ID: "start-daemon", Label: "Start vtunnel daemon", Mutates: true}},
+		},
 	}
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)}
+	model := NewModel(engine)
+	model.report = engine.report
+
+	// enter opens the confirmation with Confirm focused (non-destructive default).
+	updated, _ := model.Update(key("enter"))
+	model = updated.(Model)
+	if !model.confirming || model.confirmCancel {
+		t.Fatalf("want confirming with Confirm focused, got confirming=%v cancel=%v", model.confirming, model.confirmCancel)
+	}
+
+	// "l" toggles focus to Cancel.
+	updated, _ = model.Update(key("l"))
+	model = updated.(Model)
+	if !model.confirmCancel {
+		t.Fatal("want Cancel focused after toggle")
+	}
+
+	// enter on Cancel closes without executing.
+	updated, cmd := model.Update(key("enter"))
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("enter on Cancel must not execute")
+	}
+	if model.confirming {
+		t.Fatal("want confirmation closed")
+	}
+	if engine.executed != "" {
+		t.Fatalf("nothing should have executed, got %q", engine.executed)
+	}
+}
+
+func key(value string) tea.KeyPressMsg {
+	switch value {
+	case "enter":
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	case "down":
+		return tea.KeyPressMsg{Code: tea.KeyDown}
+	default:
+		return tea.KeyPressMsg{Code: []rune(value)[0], Text: value}
+	}
 }
 
 type fakeEngine struct {
