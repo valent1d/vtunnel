@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +14,6 @@ import (
 
 const (
 	DefaultBaseURL = "https://api.cloudflare.com/client/v4"
-	TokenEnv       = "CLOUDFLARE_API_TOKEN"
 	BaseURLEnv     = "VTUNNEL_CLOUDFLARE_API_BASE"
 )
 
@@ -28,14 +26,6 @@ type Client struct {
 }
 
 type Option func(*Client)
-
-func WithHTTPClient(httpClient *http.Client) Option {
-	return func(client *Client) {
-		if httpClient != nil {
-			client.http = httpClient
-		}
-	}
-}
 
 func WithBaseURL(baseURL string) Option {
 	return func(client *Client) {
@@ -62,14 +52,6 @@ func New(token string, options ...Option) (*Client, error) {
 		option(client)
 	}
 	return client, nil
-}
-
-func NewFromEnv() (*Client, error) {
-	options := []Option{}
-	if baseURL := os.Getenv(BaseURLEnv); strings.TrimSpace(baseURL) != "" {
-		options = append(options, WithBaseURL(baseURL))
-	}
-	return New(os.Getenv(TokenEnv), options...)
 }
 
 type TokenStatus struct {

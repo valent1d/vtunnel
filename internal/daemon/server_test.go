@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
@@ -122,6 +123,72 @@ func TestServerRoutesProxyRequestsByHost(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not stop")
+	}
+}
+
+func TestProxyHandlerRewritesHostAndForwardsHeaders(t *testing.T) {
+	var gotHost, gotXFH, gotXFP, gotXFF string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		gotXFH = r.Header.Get("X-Forwarded-Host")
+		gotXFP = r.Header.Get("X-Forwarded-Proto")
+		gotXFF = r.Header.Get("X-Forwarded-For")
+		_, _ = io.WriteString(w, "ok:"+r.URL.Path)
+	}))
+	defer upstream.Close()
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := routes.NewStore(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(routes.Route{Hostname: "dev.example.test", Target: upstream.URL}); err != nil {
+		t.Fatal(err)
+	}
+	logStore, err := requestlog.NewStore(filepath.Join(t.TempDir(), "requests.jsonl"), requestlog.DefaultMaxEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := New(config.Default(), store, logStore, slog.New(slog.NewTextHandler(io.Discard, nil))).proxyHandler()
+
+	// Known host: request is proxied, Host is rewritten to the upstream and the
+	// forwarded headers reflect the public hostname over https.
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/hello", nil)
+	req.Host = "dev.example.test"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got, want := rec.Body.String(), "ok:/hello"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+	if gotHost != upstreamURL.Host {
+		t.Errorf("upstream Host = %q, want %q", gotHost, upstreamURL.Host)
+	}
+	if gotXFH != "dev.example.test" {
+		t.Errorf("X-Forwarded-Host = %q, want %q", gotXFH, "dev.example.test")
+	}
+	if gotXFP != "https" {
+		t.Errorf("X-Forwarded-Proto = %q, want %q", gotXFP, "https")
+	}
+	if gotXFF == "" {
+		t.Error("X-Forwarded-For was not set on the proxied request")
+	}
+
+	// Unknown host: no route, so the proxy must answer 404 without dialing upstream.
+	unknown := httptest.NewRequest(http.MethodGet, "http://proxy.local/", nil)
+	unknown.Host = "missing.example.test"
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, unknown)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown-host status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 

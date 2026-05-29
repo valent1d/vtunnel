@@ -114,6 +114,32 @@ func (runner TunnelRunner) Create(ctx context.Context, name string, credentialsF
 	return result, nil
 }
 
+func (runner TunnelRunner) Delete(ctx context.Context, tunnel string, force bool) error {
+	path := runner.Path
+	if path == "" {
+		var err error
+		path, err = exec.LookPath("cloudflared")
+		if err != nil {
+			return err
+		}
+	}
+
+	tunnel = strings.TrimSpace(tunnel)
+	if tunnel == "" {
+		return fmt.Errorf("tunnel is required")
+	}
+	args := []string{"tunnel", "delete"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, tunnel)
+	output, err := exec.CommandContext(ctx, path, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("cloudflared tunnel delete: %s", strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 func defaultCredentialsFile(tunnelID string) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cloudflared", tunnelID+".json")

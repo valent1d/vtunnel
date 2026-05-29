@@ -93,7 +93,43 @@ func listenAndServeLocal(server *http.Server) error {
 	return err
 }
 
+type proxyTargetKey struct{}
+
+type proxyTarget struct {
+	url      *url.URL
+	hostname string
+}
+
 func (s *Server) proxyHandler() http.Handler {
+	// A single reverse proxy is shared across requests; the per-request target is
+	// resolved in the handler and passed through the request context. This avoids
+	// allocating a proxy per request and uses the modern Rewrite hook (Director
+	// is deprecated as of Go 1.26).
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			target, ok := pr.In.Context().Value(proxyTargetKey{}).(*proxyTarget)
+			if !ok {
+				return
+			}
+			pr.SetURL(target.url)
+			pr.SetXForwarded()
+			pr.Out.Header.Set("X-Forwarded-Host", target.hostname)
+			proto := pr.In.Header.Get("X-Forwarded-Proto")
+			if proto == "" {
+				proto = "https"
+			}
+			pr.Out.Header.Set("X-Forwarded-Proto", proto)
+		},
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			host, target := "", ""
+			if t, ok := req.Context().Value(proxyTargetKey{}).(*proxyTarget); ok {
+				host, target = t.hostname, t.url.String()
+			}
+			s.logger.Warn("proxy request failed", "host", host, "target", target, "error", err)
+			http.Error(w, "vtunnel: upstream unavailable", http.StatusBadGateway)
+		},
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hostname := requestHostname(r)
 		route, ok := s.routes.Get(hostname)
@@ -108,23 +144,10 @@ func (s *Server) proxyHandler() http.Handler {
 			return
 		}
 
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		originalDirector := proxy.Director
-		proxy.Director = func(req *http.Request) {
-			originalDirector(req)
-			req.Host = target.Host
-			req.Header.Set("X-Forwarded-Host", hostname)
-			if req.Header.Get("X-Forwarded-Proto") == "" {
-				req.Header.Set("X-Forwarded-Proto", "https")
-			}
-		}
-		proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
-			s.logger.Warn("proxy request failed", "host", hostname, "target", route.Target, "error", err)
-			http.Error(w, "vtunnel: upstream unavailable", http.StatusBadGateway)
-		}
+		ctx := context.WithValue(r.Context(), proxyTargetKey{}, &proxyTarget{url: target, hostname: hostname})
 		recorder := newResponseRecorder(w)
 		started := time.Now()
-		proxy.ServeHTTP(recorder, r)
+		proxy.ServeHTTP(recorder, r.WithContext(ctx))
 		s.recordRequest(r, route, recorder, time.Since(started))
 	})
 }

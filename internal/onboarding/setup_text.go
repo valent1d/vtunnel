@@ -64,7 +64,7 @@ func PrintSetupText(out io.Writer, report Report, options SetupTextOptions) {
 		fmt.Fprintln(out, "  1. Re-run: vtunnel setup")
 		return
 	}
-	action := report.Actions[0]
+	action := setupNextAction(report.Actions)
 	if printSetupNext(out, action) {
 		return
 	}
@@ -77,6 +77,30 @@ func PrintSetupText(out io.Writer, report Report, options SetupTextOptions) {
 		return
 	}
 	fmt.Fprintf(out, "  1. %s: vtunnel setup --%s\n", action.Label, setupFlagForAction(action.ID))
+}
+
+func setupNextAction(actions []Action) Action {
+	priorities := []string{
+		"write-cloudflared",
+		"fix-tunnel",
+		"fix-dns",
+		"start-cloudflared",
+		"start-daemon",
+		"save-config",
+		"install-cloudflared",
+		"update-cloudflared",
+		"login-cloudflared",
+		"store-token",
+		"add-domain",
+	}
+	for _, id := range priorities {
+		for _, action := range actions {
+			if action.ID == id {
+				return action
+			}
+		}
+	}
+	return actions[0]
 }
 
 func printSetupNext(out io.Writer, action Action) bool {

@@ -120,13 +120,16 @@ func printWelcome(out io.Writer) {
 	fmt.Fprintln(out, "Pleasant local tunnels powered by Cloudflare Tunnel.")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Useful commands:")
-	fmt.Fprintln(out, "  vtunnel onboarding          Guided first-run setup")
-	fmt.Fprintln(out, "  vtunnel http                Open the tunnel dashboard")
-	fmt.Fprintln(out, "  vtunnel http 3000 dev       Expose localhost:3000 as dev.<domain>")
-	fmt.Fprintln(out, "  vtunnel list                List active tunnels")
-	fmt.Fprintln(out, "  vtunnel logs dev            Show request logs")
-	fmt.Fprintln(out, "  vtunnel service install     Start vtunnel automatically at login")
-	fmt.Fprintln(out, "  vtunnel status              Show local status")
+	commands := onboarding.CommandReference("")
+	width := 0
+	for _, command := range commands {
+		if len(command.Invocation) > width {
+			width = len(command.Invocation)
+		}
+	}
+	for _, command := range commands {
+		fmt.Fprintf(out, "  %-*s  %s\n", width, command.Invocation, command.Description)
+	}
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Run `vtunnel --help` for all commands.")
 }
@@ -1555,16 +1558,6 @@ type cloudflaredProcessInspection struct {
 	Processes []cloudflaredProcess
 	Matches   []cloudflaredProcess
 	Err       error
-}
-
-func (inspection cloudflaredProcessInspection) RunningForConfig() bool {
-	return len(inspection.Matches) > 0
-}
-
-func (inspection cloudflaredInspection) UpdateAvailable() bool {
-	return inspection.LocalVersion != "" &&
-		inspection.LatestVersion != "" &&
-		inspection.LocalVersion != inspection.LatestVersion
 }
 
 func inspectCloudflared() cloudflaredInspection {

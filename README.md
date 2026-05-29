@@ -1,137 +1,146 @@
-# vtunnel
+<div align="center">
 
-`vtunnel` is a local developer tool that aims to provide an ngrok-like workflow on top of Cloudflare Tunnel.
+```
+  _   __________  ___  ___  ________
+ | | / /_  __/ / / / |/ / |/ / __/ /
+ | |/ / / / / /_/ /    /    / _// /__
+ |___/ /_/  \____/_/|_/_/|_/___/____/
+```
 
-The core idea is simple:
+**Expose your local apps on your own Cloudflare domain — with a polished CLI & TUI.**
 
-1. Configure Cloudflare and `cloudflared` once with wildcard ingress rules.
-2. Let `cloudflared` forward wildcard traffic to a local `vtunnel` proxy.
-3. Let `vtunnel` dynamically route each public hostname to a local port.
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Built with Charm](https://img.shields.io/badge/Built_with-Charm-FF1493)](https://charm.sh)
+[![Release](https://img.shields.io/github/v/release/valent1d/vtunnel?include_prereleases&label=release&color=42A5F5)](https://github.com/valent1d/vtunnel/releases)
+
+```bash
+vtunnel http 3000 dev   →   https://dev.example.com
+```
+
+</div>
+
+---
+
+`vtunnel` turns Cloudflare Tunnel into a pleasant daily local-dev experience. Point a wildcard domain at a tunnel once, then expose any local port at a clean public URL in one command — no random subdomains, no per-seat pricing, no re-configuring Cloudflare every time.
+
+A guided wizard sets everything up, and a built-in TUI dashboard lets you watch requests as they come in.
+
+> **Status: beta — actively developed.** The daily workflow (`onboarding`, `http`, `list`, `logs`) is solid. Expect rough edges in less-traveled paths, and a few features (services, Keychain) are macOS-only for now.
+
+## How it works
+
+`vtunnel` doesn't replace `cloudflared` — it sits in front of it and makes the local side enjoyable.
 
 ```txt
 Internet
-  -> Cloudflare wildcard DNS
-  -> Cloudflare Tunnel
-  -> cloudflared
-  -> vtunnel local proxy
-  -> localhost:<project-port>
+  → Cloudflare wildcard DNS   (*.example.com)
+  → Cloudflare Tunnel
+  → cloudflared
+  → vtunnel local proxy       (127.0.0.1:8787)
+  → localhost:<your app port>
 ```
 
-The goal is not to replace `cloudflared`. The goal is to make the daily local-development workflow pleasant while still relying on Cloudflare Tunnel for traffic.
+Cloudflare and `cloudflared` are configured **once** with a wildcard ingress rule. After that, exposing an app is just a local route change — `vtunnel` dynamically maps each public hostname to a local port. Your Cloudflare setup never gets touched again on a daily basis.
 
-## Current Status
+## Quick start
 
-This is an early MVP. It currently supports:
-
-- local config under `~/.config/vtunnel/`
-- a local proxy on `127.0.0.1:8787`
-- a local API on `127.0.0.1:8788`
-- dynamic hostname-to-local-port routes
-- request logs
-- a basic TUI dashboard
-- a guided `vtunnel onboarding` first-run wizard
-- `cloudflared` config diagnostics and local ingress repair
-- optional Cloudflare API discovery via a token stored in macOS Keychain
-- wildcard DNS repair through the Cloudflare API or `cloudflared`
-- release metadata through `vtunnel --version`
-- macOS LaunchAgent installation for `vtunnel` and `cloudflared`
-
-Homebrew packaging is available through the public tap.
-
-## Development
-
-Requirements:
-
-- Go
-- optionally `cloudflared`
-
-Run tests:
+**1. Install** (macOS, via the Homebrew tap):
 
 ```bash
-go test ./...
+brew install valent1d/vtunnel/vtunnel
 ```
 
-Build:
-
-```bash
-make build VERSION=v0.1.0
-./bin/vtunnel --version
-```
-
-Run from source:
-
-```bash
-go run ./cmd/vtunnel --help
-```
-
-Create local release artifacts:
-
-```bash
-scripts/release.sh 0.1.0
-```
-
-This generates macOS archives and checksums under `dist/`. Tagged GitHub releases are handled by `.github/workflows/release.yml`.
-
-See `docs/release.md` for the Homebrew formula flow, including private repository caveats.
-
-## Setup
-
-For guided first-run setup:
+**2. Run the guided setup:**
 
 ```bash
 vtunnel onboarding
 ```
 
-The wizard checks local dependencies, Cloudflare auth, domains, tunnels, wildcard DNS, local `cloudflared` config, and runtime processes before ending with a ready summary.
+The wizard walks through 11 steps — local dependencies, Cloudflare auth, domains, tunnel, wildcard DNS, local `cloudflared` config, and runtime processes — fixing what it can along the way and ending with a ready summary.
 
-Add one or more domains to the local vtunnel config:
+**3. Expose a local app:**
+
+```bash
+vtunnel http 3000 dev
+```
+
+That starts the local daemon, ensures `cloudflared` is running, and serves `localhost:3000` at `https://dev.<your-domain>` while following its request logs live.
+
+## Daily commands
+
+| Command | What it does |
+| --- | --- |
+| `vtunnel http 3000 dev` | Expose `localhost:3000` at `dev.<domain>` |
+| `vtunnel http` | Open the request dashboard (TUI) |
+| `vtunnel list` | List active routes |
+| `vtunnel logs dev` | Show request logs (`-f` to follow) |
+| `vtunnel stop dev` | Remove a route |
+| `vtunnel status` | Show daemon and config status |
+| `vtunnel service install` | Start vtunnel automatically at login (macOS) |
+| `vtunnel --help` | Show every command and flag |
+
+### Exposing apps
+
+```bash
+vtunnel http 3000 dev                  # → https://dev.<default-domain>
+vtunnel http 5173 app --domain example.dev   # pick a specific domain
+vtunnel http 3000 dev --detach         # create the route and return (no log tail)
+```
+
+### The dashboard
+
+```bash
+vtunnel http        # no port → open the TUI dashboard
+```
+
+The dashboard lists your active routes and streams incoming requests so you can inspect traffic without leaving the terminal.
+
+### Logs
+
+```bash
+vtunnel logs              # all routes
+vtunnel logs dev          # one route
+vtunnel logs dev --follow # live tail
+vtunnel logs --limit 100  # more history
+```
+
+## One-time setup
+
+Most people just run `vtunnel onboarding` and never touch this. If you'd rather drive setup yourself, `vtunnel setup` runs the same diagnostics and applies fixes with explicit flags (it prints a dry-run plan by default).
+
+Add one or more domains:
 
 ```bash
 vtunnel setup --domain example.com
 ```
 
-By default, `setup` runs diagnostics and prints a dry-run plan for local `cloudflared` config changes.
-
-Connect native `cloudflared` account credentials:
+Connect native `cloudflared` credentials (creates `~/.cloudflared/cert.pem`):
 
 ```bash
 vtunnel cloudflared login
 vtunnel cloudflared status
 ```
 
-This uses `cloudflared tunnel login` and stores Cloudflare's `cert.pem` in `~/.cloudflared/`.
-
-To write missing or incorrect local `cloudflared` ingress rules:
+Apply the local `cloudflared` ingress rules (a timestamped backup is created first):
 
 ```bash
 vtunnel setup --domain example.com --write-cloudflared
 ```
 
-When writing, vtunnel creates a timestamped backup of the existing `cloudflared` config first.
-
-To create and configure a replacement tunnel when the configured tunnel no longer exists:
+Repair a missing tunnel or wildcard DNS:
 
 ```bash
-vtunnel setup --fix-tunnel
+vtunnel setup --fix-tunnel    # recreate the tunnel and update local config
+vtunnel setup --fix-dns       # point wildcard DNS at the tunnel
 ```
 
-To repair wildcard DNS records so they point at the configured tunnel:
-
-```bash
-vtunnel setup --fix-dns
-```
-
-When possible, vtunnel uses the Cloudflare API token stored in macOS Keychain. If no token is available, it can fall back to `cloudflared tunnel route dns --overwrite-dns`.
-
-To start `cloudflared` with the configured tunnel config:
+Start `cloudflared` with the configured tunnel:
 
 ```bash
 vtunnel setup --start-cloudflared
 ```
 
-The process is started in the background and logs to `~/.config/vtunnel/logs/cloudflared.log`.
-
-Expected `cloudflared` ingress shape:
+The expected `cloudflared` ingress shape `vtunnel` manages:
 
 ```yaml
 ingress:
@@ -140,71 +149,27 @@ ingress:
   - service: http_status:404
 ```
 
-## Usage
+### Optional: Cloudflare API access
 
-Expose a local service:
-
-```bash
-vtunnel http 3000 dev
-```
-
-This starts the local vtunnel daemon and, when the setup is ready, starts `cloudflared` automatically if it is not already running with the vtunnel config.
-
-With a specific domain:
+For safer DNS verification and repair, `vtunnel` can use a Cloudflare API token:
 
 ```bash
-vtunnel http 5173 app --domain example.dev
+vtunnel cloudflare auth     # opens a pre-filled token template, then stores it
+vtunnel cloudflare status   # read-only discovery of accounts, zones, DNS
 ```
 
-Run detached instead of following request logs:
+The token is stored in the macOS Keychain and is entirely optional — tunnels are discovered through `cloudflared` and `cert.pem`, not the API token. DNS repair falls back to `cloudflared tunnel route dns` when no token is present.
 
-```bash
-vtunnel http 3000 dev --detach
-```
+## Run at login (macOS)
 
-List routes:
-
-```bash
-vtunnel list
-```
-
-Stop a route:
-
-```bash
-vtunnel stop dev
-```
-
-Show request logs:
-
-```bash
-vtunnel logs
-vtunnel logs dev
-vtunnel logs dev --follow
-```
-
-Open the TUI dashboard:
-
-```bash
-vtunnel
-```
-
-Daemon controls:
-
-```bash
-vtunnel daemon stop
-vtunnel daemon restart
-```
-
-Install vtunnel and cloudflared as macOS user services:
+Install `vtunnel` and `cloudflared` as user LaunchAgents so they start automatically:
 
 ```bash
 vtunnel service install
 vtunnel service status
 ```
 
-This writes user LaunchAgents under `~/Library/LaunchAgents/` and starts both services with `launchctl`. The services restart automatically when you log in.
-
-Service controls:
+This writes LaunchAgents (`sh.vltn.vtunnel.daemon`, `sh.vltn.vtunnel.cloudflared`) under `~/Library/LaunchAgents/` and manages them with `launchctl`. They restart when you log in.
 
 ```bash
 vtunnel service start
@@ -212,18 +177,14 @@ vtunnel service stop
 vtunnel service uninstall
 ```
 
-Optional Cloudflare API discovery:
+You can also drive the daemon directly without services:
 
 ```bash
-vtunnel cloudflare auth
-vtunnel cloudflare status
+vtunnel daemon stop
+vtunnel daemon restart
 ```
 
-`cloudflare auth` opens a Cloudflare token template URL with vtunnel permissions pre-filled, then stores the token in macOS Keychain.
-
-This verifies the token and lists accessible accounts, zones, and wildcard DNS records. Tunnels are discovered through `cloudflared` and `cert.pem`, not the Cloudflare API token.
-
-## Config
+## Configuration
 
 Default paths:
 
@@ -233,7 +194,7 @@ Default paths:
 ~/.config/vtunnel/logs/requests.jsonl
 ```
 
-Example config:
+Example `config.yml`:
 
 ```yaml
 default_domain: example.com
@@ -251,4 +212,20 @@ cloudflared:
   config_path: ~/.cloudflared/config.yml
 ```
 
-The API must stay bound to `127.0.0.1`.
+For safety, the local proxy and API must stay bound to `127.0.0.1`.
+
+## Platform support
+
+`vtunnel` is built and tested on **macOS**: installation (Homebrew tap), background services (LaunchAgents), and token storage (Keychain) target macOS first. The core — the proxy, daemon, routing, and request logs — is portable, so Linux works for the daily flow, but service installation and Keychain integration are macOS-only for now.
+
+## Built with
+
+- **[Go](https://go.dev)** — a single static binary, no runtime to install
+- **[Cobra](https://github.com/spf13/cobra)** — command-line framework
+- **[Bubble Tea](https://github.com/charmbracelet/bubbletea)**, **[Lip Gloss](https://github.com/charmbracelet/lipgloss)** & **[Bubbles](https://github.com/charmbracelet/bubbles)** — the [Charm](https://charm.sh) stack behind the onboarding wizard and TUI dashboard
+
+---
+
+<div align="center">
+<sub>vtunnel by <a href="https://vltn.sh">vltn.sh</a></sub>
+</div>

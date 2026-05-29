@@ -52,14 +52,6 @@ func (store Store) Set(account string, secret string) error {
 	return nil
 }
 
-func (store Store) Delete(account string) error {
-	err := deleteOne(store.service(), account)
-	if errors.Is(err, ErrNotFound) {
-		return ErrNotFound
-	}
-	return err
-}
-
 func deleteAll(service string, account string) error {
 	for {
 		err := deleteOne(service, account)

@@ -70,6 +70,204 @@ func TestExecuteAddDomainPersistsConfig(t *testing.T) {
 	}
 }
 
+func TestExecuteSetDefaultDomainPersistsConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yml")
+	cfg := config.Default()
+	cfg.DefaultDomain = "one.test"
+	cfg.Domains = []string{"one.test", "two.test"}
+	engine := New(Options{ConfigPath: configPath, Config: cfg})
+
+	notice, err := engine.Execute(context.Background(), "set-default-domain", "Two.Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(notice, "two.test") {
+		t.Fatalf("notice = %q", notice)
+	}
+
+	saved, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.DefaultDomain != "two.test" {
+		t.Fatalf("default domain = %q", saved.DefaultDomain)
+	}
+}
+
+func TestExecuteRemoveDomainPersistsConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yml")
+	cfg := config.Default()
+	cfg.DefaultDomain = "one.test"
+	cfg.Domains = []string{"one.test", "two.test"}
+	engine := New(Options{ConfigPath: configPath, Config: cfg})
+
+	notice, err := engine.Execute(context.Background(), "remove-domain", "One.Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(notice, "one.test") {
+		t.Fatalf("notice = %q", notice)
+	}
+
+	saved, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.DefaultDomain != "two.test" {
+		t.Fatalf("default domain = %q", saved.DefaultDomain)
+	}
+	if got := strings.Join(saved.Domains, ","); got != "two.test" {
+		t.Fatalf("domains = %q", got)
+	}
+}
+
+func TestExecuteRenameDomainPersistsConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yml")
+	cfg := config.Default()
+	cfg.DefaultDomain = "one.test"
+	cfg.Domains = []string{"one.test", "two.test"}
+	engine := New(Options{ConfigPath: configPath, Config: cfg})
+
+	notice, err := engine.Execute(context.Background(), "rename-domain", "One.Test=New.Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(notice, "one.test -> new.test") {
+		t.Fatalf("notice = %q", notice)
+	}
+
+	saved, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.DefaultDomain != "new.test" {
+		t.Fatalf("default domain = %q", saved.DefaultDomain)
+	}
+	if got := strings.Join(saved.Domains, ","); got != "new.test,two.test" {
+		t.Fatalf("domains = %q", got)
+	}
+}
+
+func TestExecuteUseTunnelWritesCloudflaredConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	cloudflaredPath := filepath.Join(tempDir, "cloudflared.yml")
+	cfg := config.Default()
+	cfg.Cloudflared.ConfigPath = cloudflaredPath
+	engine := New(Options{ConfigPath: filepath.Join(tempDir, "config.yml"), Config: cfg})
+	engine.deps.inspectCF = func(context.Context) Cloudflared {
+		return Cloudflared{
+			Path: "/bin/cloudflared",
+			Tunnels: []cf.Tunnel{{
+				ID:   "11111111-1111-1111-1111-111111111111",
+				Name: "vtunnel-main",
+			}},
+		}
+	}
+	engine.deps.inspectProcess = func(context.Context, string, string, string) ProcessInspection {
+		return ProcessInspection{}
+	}
+
+	notice, err := engine.Execute(context.Background(), "use-tunnel", "vtunnel-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(notice, "vtunnel-main") {
+		t.Fatalf("notice = %q", notice)
+	}
+
+	cloudflaredCfg, err := cf.Load(cloudflaredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cloudflaredCfg.Tunnel != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("tunnel = %q", cloudflaredCfg.Tunnel)
+	}
+	if !strings.Contains(cloudflaredCfg.CredentialsFile, "11111111-1111-1111-1111-111111111111.json") {
+		t.Fatalf("credentials-file = %q", cloudflaredCfg.CredentialsFile)
+	}
+}
+
+func TestExecuteDeleteTunnelUsesCloudflared(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := config.Default()
+	cfg.Cloudflared.ConfigPath = filepath.Join(tempDir, "cloudflared.yml")
+	engine := New(Options{ConfigPath: filepath.Join(tempDir, "config.yml"), Config: cfg})
+	engine.deps.inspectCF = func(context.Context) Cloudflared {
+		return Cloudflared{
+			Path: "/bin/cloudflared",
+			Tunnels: []cf.Tunnel{{
+				ID:   "22222222-2222-2222-2222-222222222222",
+				Name: "old",
+			}},
+		}
+	}
+	engine.deps.inspectProcess = func(context.Context, string, string, string) ProcessInspection {
+		return ProcessInspection{}
+	}
+	deleted := ""
+	engine.deps.deleteCloudflaredTunnel = func(_ context.Context, _ string, tunnel string, force bool) error {
+		if force {
+			t.Fatal("delete should not force by default")
+		}
+		deleted = tunnel
+		return nil
+	}
+
+	notice, err := engine.Execute(context.Background(), "delete-tunnel", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != "22222222-2222-2222-2222-222222222222" {
+		t.Fatalf("deleted = %q", deleted)
+	}
+	if !strings.Contains(notice, "old") {
+		t.Fatalf("notice = %q", notice)
+	}
+}
+
+func TestReportBuildsFullWizardStepsEvenWhenDomainsExist(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := config.Default()
+	cfg.DefaultDomain = "example.test"
+	cfg.Domains = []string{"example.test"}
+	engine := New(Options{ConfigPath: filepath.Join(tempDir, "config.yml"), Config: cfg})
+	engine.deps.readToken = func() (string, error) { return "", secrets.ErrNotFound }
+	engine.deps.inspectCF = func(context.Context) Cloudflared {
+		return Cloudflared{CertPath: filepath.Join(tempDir, "cert.pem"), Err: errors.New("not found")}
+	}
+	engine.deps.inspectProcess = func(context.Context, string, string, string) ProcessInspection {
+		return ProcessInspection{}
+	}
+
+	report := engine.Report(context.Background())
+	if len(report.Steps) != 11 {
+		t.Fatalf("steps = %d, want 11: %#v", len(report.Steps), report.Steps)
+	}
+	if report.Steps[0].ID != StepWelcome || report.Steps[len(report.Steps)-1].ID != StepCompletion {
+		t.Fatalf("unexpected first/last step: %s/%s", report.Steps[0].ID, report.Steps[len(report.Steps)-1].ID)
+	}
+	domainStep := findStep(report.Steps, StepDomains)
+	if domainStep == nil {
+		t.Fatal("missing domain step")
+	}
+	if !hasAction(domainStep.Actions, "manage-domains") {
+		t.Fatalf("domain actions = %#v, want manage-domains", domainStep.Actions)
+	}
+	if !hasAction(domainStep.Actions, "add-domain") {
+		t.Fatalf("domain actions = %#v, want add-domain", domainStep.Actions)
+	}
+	tunnelStep := findStep(report.Steps, StepTunnel)
+	if tunnelStep == nil {
+		t.Fatal("missing tunnel step")
+	}
+	if !hasAction(tunnelStep.Actions, "manage-tunnels") {
+		t.Fatalf("tunnel actions = %#v, want manage-tunnels", tunnelStep.Actions)
+	}
+}
+
 func TestReportWrongWildcardDNSOffersFixDNS(t *testing.T) {
 	tempDir := t.TempDir()
 	cloudflaredPath := filepath.Join(tempDir, "cloudflared.yml")
@@ -220,6 +418,15 @@ func hasAction(actions []Action, id string) bool {
 		}
 	}
 	return false
+}
+
+func findStep(steps []Step, id StepID) *Step {
+	for index := range steps {
+		if steps[index].ID == id {
+			return &steps[index]
+		}
+	}
+	return nil
 }
 
 func reportContains(report Report, labelPart string, detailPart string) bool {

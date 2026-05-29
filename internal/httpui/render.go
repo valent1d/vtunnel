@@ -496,15 +496,12 @@ func min(left int, right int) int {
 }
 
 var (
-	pageStyle     = lipgloss.NewStyle().Padding(1, 1)
-	brandStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("48"))
-	sectionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
-	borderStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("66"))
-	mutedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	footerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	selectedStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("48"))
+	pageStyle   = lipgloss.NewStyle().Padding(1, 1)
+	brandStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("48"))
+	borderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("66"))
+	mutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+
 	selectedRowStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("48"))

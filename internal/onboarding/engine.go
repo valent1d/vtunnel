@@ -21,8 +21,6 @@ import (
 	cfapi "vtunnel/internal/cloudflare"
 	cf "vtunnel/internal/cloudflared"
 	"vtunnel/internal/config"
-	"vtunnel/internal/daemon"
-	"vtunnel/internal/requestlog"
 	"vtunnel/internal/routes"
 	"vtunnel/internal/secrets"
 )
@@ -47,6 +45,33 @@ type Phase struct {
 	Checks  []Check
 }
 
+type StepID string
+
+const (
+	StepWelcome    StepID = "welcome"
+	StepLocal      StepID = "local"
+	StepAuth       StepID = "auth"
+	StepDiscovery  StepID = "discovery"
+	StepDomains    StepID = "domains"
+	StepTunnel     StepID = "tunnel"
+	StepDNS        StepID = "dns"
+	StepConfig     StepID = "config"
+	StepServices   StepID = "services"
+	StepHealth     StepID = "health"
+	StepCompletion StepID = "completion"
+)
+
+type Step struct {
+	ID          StepID
+	Title       string
+	Summary     string
+	Description string
+	Checks      []Check
+	Actions     []Action
+	Commands    []Command
+	Manual      []string
+}
+
 type Action struct {
 	ID          string
 	Label       string
@@ -56,9 +81,17 @@ type Action struct {
 	InputPrompt string
 }
 
+// Command is a reference invocation surfaced on the final step. Unlike a Check,
+// it carries no status: it is something the user runs, not a diagnostic.
+type Command struct {
+	Invocation  string
+	Description string
+}
+
 type Report struct {
 	Ready   bool
 	Phases  []Phase
+	Steps   []Step
 	Actions []Action
 	Updated time.Time
 }
@@ -84,6 +117,7 @@ type Hooks struct {
 	StartCloudflared        func(context.Context, string, string) (StartResult, error)
 	StartDaemon             func(context.Context, config.Config, string) error
 	CreateCloudflaredTunnel func(context.Context, string, string) (cf.CreateTunnelResult, error)
+	DeleteCloudflaredTunnel func(context.Context, string, string, bool) error
 	WriteTunnelConfig       func(cf.TunnelConfigUpdate) (cf.WriteResult, error)
 	WriteCloudflaredPlan    func(cf.Plan) (cf.WriteResult, error)
 }
@@ -98,6 +132,7 @@ type deps struct {
 	startCloudflared        func(context.Context, string, string) (StartResult, error)
 	startDaemon             func(context.Context, config.Config, string) error
 	createCloudflaredTunnel func(context.Context, string, string) (cf.CreateTunnelResult, error)
+	deleteCloudflaredTunnel func(context.Context, string, string, bool) error
 	writeTunnelConfig       func(cf.TunnelConfigUpdate) (cf.WriteResult, error)
 	writeCloudflaredPlan    func(cf.Plan) (cf.WriteResult, error)
 }
@@ -226,6 +261,9 @@ func New(options Options) *Engine {
 		createCloudflaredTunnel: func(ctx context.Context, path string, name string) (cf.CreateTunnelResult, error) {
 			return cf.NewTunnelRunner(path).Create(ctx, name, "")
 		},
+		deleteCloudflaredTunnel: func(ctx context.Context, path string, tunnel string, force bool) error {
+			return cf.NewTunnelRunner(path).Delete(ctx, tunnel, force)
+		},
 		writeTunnelConfig: func(update cf.TunnelConfigUpdate) (cf.WriteResult, error) {
 			return cf.WriteTunnelConfigUpdate(update, time.Now())
 		},
@@ -263,6 +301,9 @@ func (engine *Engine) applyHooks(hooks Hooks) {
 	if hooks.CreateCloudflaredTunnel != nil {
 		engine.deps.createCloudflaredTunnel = hooks.CreateCloudflaredTunnel
 	}
+	if hooks.DeleteCloudflaredTunnel != nil {
+		engine.deps.deleteCloudflaredTunnel = hooks.DeleteCloudflaredTunnel
+	}
 	if hooks.WriteTunnelConfig != nil {
 		engine.deps.writeTunnelConfig = hooks.WriteTunnelConfig
 	}
@@ -285,14 +326,17 @@ func (engine *Engine) Report(ctx context.Context) Report {
 		welcomePhase(),
 		localPhase(s),
 		cloudflarePhase(s),
+		discoveryPhase(s),
 		domainPhase(s),
 		tunnelPhase(s),
 		dnsPhase(s),
 		configPhase(s),
+		servicesPhase(s),
 		runtimePhase(s),
 		completionPhase(s),
 	}
 	report.Actions = availableActions(s)
+	report.Steps = wizardSteps(s)
 	return report
 }
 
@@ -316,9 +360,51 @@ func (engine *Engine) Execute(ctx context.Context, actionID string, input string
 		}
 		engine.options.Config = cfg
 		return "Domain added: " + domain, nil
+	case "set-default-domain":
+		domain := routes.NormalizeHostname(input)
+		if domain == "" {
+			return "", errors.New("domain is required")
+		}
+		cfg, ok := setDefaultDomain(engine.options.Config, domain)
+		if !ok {
+			return "", fmt.Errorf("domain %q is not configured yet", domain)
+		}
+		if err := config.Save(engine.options.ConfigPath, cfg); err != nil {
+			return "", err
+		}
+		engine.options.Config = cfg
+		return "Default domain set: " + domain, nil
+	case "remove-domain":
+		domain := routes.NormalizeHostname(input)
+		if domain == "" {
+			return "", errors.New("domain is required")
+		}
+		cfg, ok := removeDomain(engine.options.Config, domain)
+		if !ok {
+			return "", fmt.Errorf("domain %q is not configured yet", domain)
+		}
+		if err := config.Save(engine.options.ConfigPath, cfg); err != nil {
+			return "", err
+		}
+		engine.options.Config = cfg
+		return "Domain removed: " + domain, nil
+	case "rename-domain":
+		from, to, ok := parseDomainRename(input)
+		if !ok {
+			return "", errors.New("rename input must be old-domain=new-domain")
+		}
+		cfg, ok := renameDomain(engine.options.Config, from, to)
+		if !ok {
+			return "", fmt.Errorf("domain %q is not configured yet", from)
+		}
+		if err := config.Save(engine.options.ConfigPath, cfg); err != nil {
+			return "", err
+		}
+		engine.options.Config = cfg
+		return "Domain renamed: " + from + " -> " + to, nil
 	case "store-token":
 		if input == "" {
-			return "", errors.New("Cloudflare API token is required")
+			return "", errors.New("cloudflare API token is required")
 		}
 		client, err := engine.deps.cloudflareClient(input)
 		if err != nil {
@@ -370,6 +456,51 @@ func (engine *Engine) Execute(ctx context.Context, actionID string, input string
 			return "tunnel already exists: " + result.TunnelName, nil
 		}
 		return "tunnel created: " + result.TunnelName + " (" + result.TunnelID + ")", nil
+	case "use-tunnel":
+		tunnelRef := strings.TrimSpace(input)
+		if tunnelRef == "" {
+			return "", errors.New("tunnel is required")
+		}
+		s := engine.snapshot(ctx)
+		tunnel, found := cf.FindTunnel(s.cloudflared.Tunnels, tunnelRef)
+		if !found {
+			return "", fmt.Errorf("tunnel %q is not visible via cloudflared", tunnelRef)
+		}
+		if err := engine.writeConfiguredTunnel(tunnel.ID, defaultTunnelCredentialsFile(tunnel.ID)); err != nil {
+			return "", err
+		}
+		return "Tunnel selected: " + tunnel.Name + " (" + tunnel.ID + ")", nil
+	case "create-tunnel":
+		name := strings.TrimSpace(input)
+		if name == "" {
+			return "", errors.New("tunnel name is required")
+		}
+		s := engine.snapshot(ctx)
+		result, err := engine.deps.createCloudflaredTunnel(ctx, s.cloudflared.Path, name)
+		if err != nil {
+			return "", err
+		}
+		if err := engine.writeConfiguredTunnel(result.ID, result.CredentialsFile); err != nil {
+			return "", err
+		}
+		return "Tunnel created and selected: " + result.Name + " (" + result.ID + ")", nil
+	case "delete-tunnel":
+		tunnelRef := strings.TrimSpace(input)
+		if tunnelRef == "" {
+			return "", errors.New("tunnel is required")
+		}
+		s := engine.snapshot(ctx)
+		tunnel, found := cf.FindTunnel(s.cloudflared.Tunnels, tunnelRef)
+		if !found {
+			return "", fmt.Errorf("tunnel %q is not visible via cloudflared", tunnelRef)
+		}
+		if s.diag.Config.Tunnel == tunnel.ID || s.diag.Config.Tunnel == tunnel.Name {
+			return "", errors.New("cannot delete the configured tunnel; select another tunnel first")
+		}
+		if err := engine.deps.deleteCloudflaredTunnel(ctx, s.cloudflared.Path, tunnel.ID, false); err != nil {
+			return "", err
+		}
+		return "Tunnel deleted: " + tunnel.Name + " (" + tunnel.ID + ")", nil
 	case "fix-dns":
 		s := engine.snapshot(ctx)
 		result, err := engine.fixDNS(ctx, s)
@@ -401,6 +532,23 @@ func (engine *Engine) Execute(ctx context.Context, actionID string, input string
 	default:
 		return "", fmt.Errorf("unknown onboarding action %q", actionID)
 	}
+}
+
+func (engine *Engine) writeConfiguredTunnel(tunnelID string, credentialsFile string) error {
+	tunnelID = strings.TrimSpace(tunnelID)
+	credentialsFile = strings.TrimSpace(credentialsFile)
+	if tunnelID == "" {
+		return errors.New("tunnel id is required")
+	}
+	if credentialsFile == "" {
+		credentialsFile = defaultTunnelCredentialsFile(tunnelID)
+	}
+	_, err := engine.deps.writeTunnelConfig(cf.TunnelConfigUpdate{
+		Path:            config.ExpandPath(engine.options.Config.Cloudflared.ConfigPath),
+		Tunnel:          tunnelID,
+		CredentialsFile: credentialsFile,
+	})
+	return err
 }
 
 func (engine *Engine) snapshot(ctx context.Context) snapshot {
@@ -535,6 +683,48 @@ func cloudflarePhase(s snapshot) Phase {
 	return Phase{Title: "Cloudflare auth", Summary: "Token, permissions and accessible zones.", Checks: checks}
 }
 
+func discoveryPhase(s snapshot) Phase {
+	checks := []Check{}
+	if s.tokenMissing {
+		checks = append(checks, Check{Label: "Cloudflare API", Status: StatusWarn, Detail: "limited discovery without token"})
+	} else if s.tokenErr != nil {
+		checks = append(checks, Check{Label: "Cloudflare API", Status: StatusAction, Detail: errDetail(s.tokenErr)})
+	} else {
+		checks = append(checks, Check{Label: "Cloudflare API", Status: StatusOK, Detail: "token verified"})
+	}
+
+	if s.zonesErr != nil {
+		checks = append(checks, Check{Label: "zones", Status: StatusAction, Detail: errDetail(s.zonesErr)})
+	} else if len(s.zones) == 0 && !s.tokenMissing && s.tokenErr == nil {
+		checks = append(checks, Check{Label: "zones", Status: StatusAction, Detail: "no accessible zones"})
+	} else if len(s.zones) > 0 {
+		checks = append(checks, Check{Label: "zones", Status: StatusOK, Detail: fmt.Sprintf("%d accessible", len(s.zones))})
+	}
+
+	if s.cloudflared.TunnelListErr != nil {
+		checks = append(checks, Check{Label: "local tunnels", Status: StatusAction, Detail: errDetail(s.cloudflared.TunnelListErr)})
+	} else if len(s.cloudflared.Tunnels) > 0 {
+		checks = append(checks, Check{Label: "local tunnels", Status: StatusOK, Detail: fmt.Sprintf("%d visible via cloudflared", len(s.cloudflared.Tunnels))})
+	} else if s.cloudflared.CertExists {
+		checks = append(checks, Check{Label: "local tunnels", Status: StatusWarn, Detail: "none visible via cloudflared"})
+	}
+
+	if s.dns.TokenMissing {
+		checks = append(checks, Check{Label: "wildcard DNS records", Status: StatusWarn, Detail: "not inspected without API token"})
+	} else if s.dns.Err != nil {
+		checks = append(checks, Check{Label: "wildcard DNS records", Status: StatusWarn, Detail: errDetail(s.dns.Err)})
+	} else if len(s.dns.Results) > 0 {
+		ready := 0
+		for _, result := range s.dns.Results {
+			if result.Ready() {
+				ready++
+			}
+		}
+		checks = append(checks, Check{Label: "wildcard DNS records", Status: checkStatus(ready == len(s.dns.Results), StatusAction), Detail: fmt.Sprintf("%d/%d ready", ready, len(s.dns.Results))})
+	}
+	return Phase{Title: "Cloudflare discovery", Summary: "Discover accounts, zones, tunnels and wildcard DNS before making changes.", Checks: checks}
+}
+
 func domainPhase(s snapshot) Phase {
 	checks := []Check{}
 	if len(s.cfg.Domains) == 0 {
@@ -561,6 +751,12 @@ func tunnelPhase(s snapshot) Phase {
 		checks = append(checks, Check{Label: "cloudflared tunnels", Status: StatusAction, Detail: errDetail(s.cloudflared.TunnelListErr)})
 	} else if len(s.cloudflared.Tunnels) > 0 {
 		checks = append(checks, Check{Label: "cloudflared tunnels", Status: StatusOK, Detail: fmt.Sprintf("%d visible", len(s.cloudflared.Tunnels))})
+		for _, tunnel := range s.cloudflared.Tunnels {
+			if strings.TrimSpace(tunnel.DeletedAt) != "" {
+				continue
+			}
+			checks = append(checks, Check{Label: "available tunnel", Status: StatusOK, Detail: tunnel.Name + " (" + tunnel.ID + ")"})
+		}
 	} else if s.cloudflared.CertExists {
 		checks = append(checks, Check{Label: "cloudflared tunnels", Status: StatusAction, Detail: "none visible"})
 	}
@@ -667,15 +863,26 @@ func runtimePhase(s snapshot) Phase {
 	return Phase{Title: "Runtime", Summary: "Start the local processes needed for daily tunneling.", Checks: checks}
 }
 
+func servicesPhase(s snapshot) Phase {
+	checks := []Check{
+		{Label: "macOS services", Status: StatusWarn, Detail: "run vtunnel service install after setup to start at login"},
+		{Label: "vtunnel daemon service", Status: StatusWarn, Detail: "managed by LaunchAgent sh.vltn.vtunnel.daemon"},
+		{Label: "cloudflared service", Status: StatusWarn, Detail: "managed by LaunchAgent sh.vltn.vtunnel.cloudflared"},
+	}
+	if runtime.GOOS != "darwin" {
+		checks = []Check{{Label: "services", Status: StatusWarn, Detail: "automatic services are currently macOS-first"}}
+	}
+	if reportReady(s) {
+		checks[0] = Check{Label: "macOS services", Status: StatusAction, Detail: "optional but recommended: vtunnel service install"}
+	}
+	return Phase{Title: "Services", Summary: "Install vtunnel and cloudflared as user services so they start at login.", Checks: checks}
+}
+
 func completionPhase(s snapshot) Phase {
 	if reportReady(s) {
 		return Phase{
 			Title:   "Completion",
 			Summary: "vtunnel is ready.",
-			Checks: []Check{
-				{Label: "Try", Status: StatusOK, Detail: "vtunnel http 3000 dev"},
-				{Label: "Dashboard", Status: StatusOK, Detail: "vtunnel"},
-			},
 		}
 	}
 	return Phase{
@@ -685,23 +892,85 @@ func completionPhase(s snapshot) Phase {
 	}
 }
 
+// Canonical command definitions: the single source of truth for the wording of
+// every command surfaced to users. The CLI welcome banner (CommandReference) and
+// the onboarding completion step (CompletionCommands) both compose their lists
+// from these, so a description can never drift between the two surfaces.
+var (
+	cmdOnboarding     = Command{Invocation: "vtunnel onboarding", Description: "Guided first-run setup"}
+	cmdDashboard      = Command{Invocation: "vtunnel http", Description: "Open the request dashboard"}
+	cmdList           = Command{Invocation: "vtunnel list", Description: "List active routes"}
+	cmdLogs           = Command{Invocation: "vtunnel logs dev", Description: "Show request logs"}
+	cmdServiceInstall = Command{Invocation: "vtunnel service install", Description: "Start vtunnel automatically at login"}
+	cmdStatus         = Command{Invocation: "vtunnel status", Description: "Show local status"}
+	cmdHelp           = Command{Invocation: "vtunnel --help", Description: "Show every command and flag"}
+)
+
+// exposeCommand is the only command whose description varies: defaultDomain, when
+// set, makes the example concrete (dev.example.com instead of dev.<domain>).
+func exposeCommand(defaultDomain string) Command {
+	host := "dev.<domain>"
+	if defaultDomain != "" {
+		host = "dev." + defaultDomain
+	}
+	return Command{Invocation: "vtunnel http 3000 dev", Description: "Expose localhost:3000 as " + host}
+}
+
+// CommandReference is the canonical "useful commands" list for the welcome banner
+// shown by bare `vtunnel`. --help is omitted on purpose: the banner surfaces it as
+// a closing call to action instead.
+func CommandReference(defaultDomain string) []Command {
+	return []Command{
+		cmdOnboarding,
+		cmdDashboard,
+		exposeCommand(defaultDomain),
+		cmdList,
+		cmdLogs,
+		cmdServiceInstall,
+		cmdStatus,
+	}
+}
+
+// CompletionCommands is the curated subset shown at the end of onboarding, where
+// `vtunnel onboarding` is redundant and --help doubles as the documentation entry.
+func CompletionCommands(defaultDomain string) []Command {
+	return []Command{
+		exposeCommand(defaultDomain),
+		cmdDashboard,
+		cmdList,
+		cmdLogs,
+		cmdHelp,
+	}
+}
+
+func completionCommands(s snapshot) []Command {
+	if !reportReady(s) {
+		return nil
+	}
+	domain := s.cfg.DefaultDomain
+	if domain == "" && len(s.cfg.Domains) > 0 {
+		domain = s.cfg.Domains[0]
+	}
+	return CompletionCommands(domain)
+}
+
+func completionNotes(s snapshot) []string {
+	if !reportReady(s) {
+		return []string{"Run the highlighted action, then press r to recheck."}
+	}
+	return []string{
+		"Subdomains are created on demand — pick any name per project.",
+		"Routes are local; your Cloudflare wildcard setup stays untouched.",
+	}
+}
+
 func availableActions(s snapshot) []Action {
 	var actions []Action
 	if !s.configExists {
 		actions = append(actions, Action{ID: "save-config", Label: "Create vtunnel config", Description: s.configPath, Mutates: true})
 	}
-	if len(s.cfg.Domains) == 0 {
-		actions = append(actions, Action{ID: "add-domain", Label: "Add a domain", Description: "Store a default vtunnel domain.", Mutates: true, InputPrompt: "Domain"})
-	}
-	if s.cloudflared.Err != nil {
-		actions = append(actions, Action{ID: "install-cloudflared", Label: "Install cloudflared manually", Description: "Run this outside vtunnel.", Command: "brew install cloudflared"})
-	}
-	if s.cloudflared.UpdateAvailable() {
-		actions = append(actions, Action{ID: "update-cloudflared", Label: "Update cloudflared manually", Description: "Run this outside vtunnel.", Command: "brew upgrade cloudflared"})
-	}
-	if !s.cloudflared.CertExists && s.cloudflared.Err == nil {
-		actions = append(actions, Action{ID: "login-cloudflared", Label: "Login to cloudflared manually", Description: "Run this outside vtunnel.", Command: "vtunnel cloudflared login"})
-	}
+	actions = append(actions, domainActions(s)...)
+	actions = append(actions, localActions(s)...)
 	if tunnelNeedsFix(s) {
 		actions = append(actions, Action{ID: "fix-tunnel", Label: "Create/fix tunnel", Description: "Create a replacement tunnel and update local config.", Mutates: true})
 	}
@@ -711,19 +980,202 @@ func availableActions(s snapshot) []Action {
 	if dnsNeedsFix(s) {
 		actions = append(actions, Action{ID: "fix-dns", Label: "Fix wildcard DNS", Description: "Create or update wildcard DNS records.", Mutates: true})
 	}
+	actions = append(actions, runtimeActions(s)...)
+	actions = append(actions, authActions(s)...)
+	return dedupeActions(actions)
+}
+
+func localActions(s snapshot) []Action {
+	var actions []Action
+	if s.cloudflared.Err != nil {
+		actions = append(actions, Action{ID: "install-cloudflared", Label: "Install cloudflared manually", Description: "Run this outside vtunnel.", Command: "brew install cloudflared"})
+	}
+	if s.cloudflared.UpdateAvailable() {
+		actions = append(actions, Action{ID: "update-cloudflared", Label: "Update cloudflared manually", Description: "Run this outside vtunnel.", Command: "brew upgrade cloudflared"})
+	}
+	if !s.cloudflared.CertExists && s.cloudflared.Err == nil {
+		actions = append(actions, Action{ID: "login-cloudflared", Label: "Login to cloudflared manually", Description: "Run this outside vtunnel.", Command: "vtunnel cloudflared login"})
+	}
+	return actions
+}
+
+func authActions(s snapshot) []Action {
+	if !s.tokenMissing && s.tokenErr == nil {
+		return nil
+	}
+	return []Action{
+		{ID: "open-token-url", Label: "Open token template", Description: "Open Cloudflare with vtunnel permissions pre-filled.", Command: TokenTemplateURL()},
+		{ID: "store-token", Label: "Store API token", Description: "Paste and verify a Cloudflare API token.", Mutates: true, InputPrompt: "Cloudflare API token"},
+	}
+}
+
+func domainActions(s snapshot) []Action {
+	actions := []Action{
+		{ID: "manage-domains", Label: "Manage domains", Description: "Open the domain manager.", Command: "manage domains"},
+		{ID: "add-domain", Label: "Add a domain", Description: "Add another domain to vtunnel.", Mutates: true, InputPrompt: "Domain"},
+	}
+	if len(s.cfg.Domains) > 1 || (len(s.cfg.Domains) == 1 && s.cfg.DefaultDomain != s.cfg.Domains[0]) {
+		actions = append(actions, Action{ID: "set-default-domain", Label: "Set default domain", Description: "Choose which configured domain is used by default.", Mutates: true, InputPrompt: "Default domain"})
+	}
+	return actions
+}
+
+func runtimeActions(s snapshot) []Action {
+	var actions []Action
 	if cloudflaredCanStart(s) {
 		actions = append(actions, Action{ID: "start-cloudflared", Label: "Start cloudflared", Description: "Run cloudflared tunnel in the background.", Mutates: true})
 	}
 	if !s.daemonRunning {
 		actions = append(actions, Action{ID: "start-daemon", Label: "Start vtunnel daemon", Description: "Start the local proxy/API daemon.", Mutates: true})
 	}
+	return actions
+}
+
+func serviceActions(s snapshot) []Action {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	return []Action{{ID: "service-install-manual", Label: "Install login services", Description: "Run this after setup to start vtunnel automatically at login.", Command: "vtunnel service install"}}
+}
+
+func dedupeActions(actions []Action) []Action {
+	seen := map[string]bool{}
+	next := make([]Action, 0, len(actions))
+	for _, action := range actions {
+		if action.ID == "" || seen[action.ID] {
+			continue
+		}
+		seen[action.ID] = true
+		next = append(next, action)
+	}
+	return next
+}
+
+func wizardSteps(s snapshot) []Step {
+	steps := []Step{
+		stepFromPhase(StepWelcome, welcomePhase(), []Action{}, []string{
+			"Cloudflare is configured once with wildcard DNS.",
+			"Daily tunnels are local route changes, not Cloudflare changes.",
+		}),
+		stepFromPhase(StepLocal, localPhase(s), append(localActions(s), configActions(s)...), []string{
+			"vtunnel keeps its API and proxy bound to 127.0.0.1.",
+			"Go is not required after installing the binary.",
+		}),
+		stepFromPhase(StepAuth, cloudflarePhase(s), authActions(s), []string{
+			"The API token is optional, but enables DNS verification and repair.",
+			"vtunnel stores the token in macOS Keychain.",
+		}),
+		stepFromPhase(StepDiscovery, discoveryPhase(s), discoveryActions(s), []string{
+			"Discovery is read-only.",
+			"Existing Cloudflare resources are preferred when they are safe to reuse.",
+		}),
+		stepFromPhase(StepDomains, domainPhase(s), domainActions(s), []string{
+			"You can return here later to add more domains.",
+			"The default domain is used when --domain is omitted.",
+		}),
+		stepFromPhase(StepTunnel, tunnelPhase(s), tunnelActions(s), []string{
+			"vtunnel reuses an existing tunnel when possible.",
+			"Creating a tunnel updates local cloudflared config but does not touch daily routes.",
+		}),
+		stepFromPhase(StepDNS, dnsPhase(s), dnsActions(s), []string{
+			"Wildcard DNS should point at the selected Cloudflare Tunnel.",
+			"DNS is configured once per domain, not on every tunnel start.",
+		}),
+		stepFromPhase(StepConfig, configPhase(s), cloudflaredConfigActions(s), []string{
+			"vtunnel preserves unrelated ingress rules.",
+			"Config writes create a timestamped backup first.",
+		}),
+		stepFromPhase(StepServices, servicesPhase(s), serviceActions(s), []string{
+			"Services are optional but recommended after setup is ready.",
+			"They start vtunnel and cloudflared automatically when you log in.",
+		}),
+		stepFromPhase(StepHealth, runtimePhase(s), runtimeActions(s), []string{
+			"Health checks verify the local daemon, proxy and cloudflared process.",
+			"You can start processes manually here before installing services.",
+		}),
+		stepFromPhase(StepCompletion, completionPhase(s), []Action{}, completionNotes(s)),
+	}
+	steps[len(steps)-1].Commands = completionCommands(s)
+	return steps
+}
+
+func stepFromPhase(id StepID, phase Phase, actions []Action, manual []string) Step {
+	return Step{
+		ID:          id,
+		Title:       phase.Title,
+		Summary:     phase.Summary,
+		Description: stepDescription(id),
+		Checks:      phase.Checks,
+		Actions:     dedupeActions(actions),
+		Manual:      manual,
+	}
+}
+
+func stepDescription(id StepID) string {
+	switch id {
+	case StepWelcome:
+		return "This guided setup walks through the full vtunnel configuration, even when parts are already ready."
+	case StepLocal:
+		return "Check local dependencies, paths and private loopback bindings."
+	case StepAuth:
+		return "Connect optional Cloudflare API access for safer DNS discovery and repair."
+	case StepDiscovery:
+		return "Read the current Cloudflare and cloudflared state before selecting anything."
+	case StepDomains:
+		return "Manage the domains vtunnel can use for wildcard local development URLs."
+	case StepTunnel:
+		return "Choose or create the Cloudflare Tunnel that receives wildcard traffic."
+	case StepDNS:
+		return "Verify each wildcard DNS record points at the selected tunnel."
+	case StepConfig:
+		return "Review and write the local cloudflared ingress config."
+	case StepServices:
+		return "Install session services so vtunnel is ready after login."
+	case StepHealth:
+		return "Start and verify the local runtime processes."
+	case StepCompletion:
+		return ""
+	default:
+		return ""
+	}
+}
+
+func configActions(s snapshot) []Action {
+	if !s.configExists {
+		return []Action{{ID: "save-config", Label: "Create vtunnel config", Description: s.configPath, Mutates: true}}
+	}
+	return nil
+}
+
+func discoveryActions(s snapshot) []Action {
 	if s.tokenMissing || s.tokenErr != nil {
-		actions = append(actions,
-			Action{ID: "open-token-url", Label: "Open token template", Description: "Open Cloudflare with vtunnel permissions pre-filled.", Command: TokenTemplateURL()},
-			Action{ID: "store-token", Label: "Store API token", Description: "Paste and verify a Cloudflare API token.", Mutates: true, InputPrompt: "Cloudflare API token"},
-		)
+		return authActions(s)
+	}
+	return nil
+}
+
+func tunnelActions(s snapshot) []Action {
+	actions := []Action{
+		{ID: "manage-tunnels", Label: "Manage tunnels", Description: "Open the tunnel manager.", Command: "manage tunnels"},
+	}
+	if tunnelNeedsFix(s) {
+		actions = append(actions, Action{ID: "fix-tunnel", Label: "Create/fix tunnel", Description: "Create a replacement tunnel and update local config.", Mutates: true})
 	}
 	return actions
+}
+
+func dnsActions(s snapshot) []Action {
+	if dnsNeedsFix(s) {
+		return []Action{{ID: "fix-dns", Label: "Fix wildcard DNS", Description: "Create or update wildcard DNS records.", Mutates: true}}
+	}
+	return nil
+}
+
+func cloudflaredConfigActions(s snapshot) []Action {
+	if s.planErr == nil && len(s.plan.Changes) > 0 && len(s.cfg.Domains) > 0 {
+		return []Action{{ID: "write-cloudflared", Label: "Write cloudflared config", Description: "Backup then apply local ingress changes.", Mutates: true}}
+	}
+	return nil
 }
 
 func reportReady(s snapshot) bool {
@@ -760,6 +1212,13 @@ func check(ok bool, failure Status, label string, okDetail string, failDetail st
 	return Check{Label: label, Status: failure, Detail: failDetail}
 }
 
+func checkStatus(ok bool, failure Status) Status {
+	if ok {
+		return StatusOK
+	}
+	return failure
+}
+
 func addDomain(cfg config.Config, domain string) config.Config {
 	domain = routes.NormalizeHostname(domain)
 	if domain == "" {
@@ -778,6 +1237,89 @@ func addDomain(cfg config.Config, domain string) config.Config {
 		cfg.DefaultDomain = domain
 	}
 	return cfg
+}
+
+func setDefaultDomain(cfg config.Config, domain string) (config.Config, bool) {
+	domain = routes.NormalizeHostname(domain)
+	for _, existing := range cfg.Domains {
+		if routes.NormalizeHostname(existing) == domain {
+			cfg.DefaultDomain = domain
+			return cfg, true
+		}
+	}
+	return cfg, false
+}
+
+func removeDomain(cfg config.Config, domain string) (config.Config, bool) {
+	domain = routes.NormalizeHostname(domain)
+	if domain == "" {
+		return cfg, false
+	}
+	next := make([]string, 0, len(cfg.Domains))
+	removed := false
+	for _, existing := range cfg.Domains {
+		normalized := routes.NormalizeHostname(existing)
+		if normalized == domain {
+			removed = true
+			continue
+		}
+		next = append(next, normalized)
+	}
+	if !removed {
+		return cfg, false
+	}
+	cfg.Domains = next
+	if routes.NormalizeHostname(cfg.DefaultDomain) == domain {
+		cfg.DefaultDomain = ""
+		if len(cfg.Domains) > 0 {
+			cfg.DefaultDomain = cfg.Domains[0]
+		}
+	}
+	return cfg, true
+}
+
+func renameDomain(cfg config.Config, from string, to string) (config.Config, bool) {
+	from = routes.NormalizeHostname(from)
+	to = routes.NormalizeHostname(to)
+	if from == "" || to == "" {
+		return cfg, false
+	}
+	found := false
+	next := make([]string, 0, len(cfg.Domains))
+	seen := map[string]struct{}{}
+	for _, existing := range cfg.Domains {
+		normalized := routes.NormalizeHostname(existing)
+		if normalized == from {
+			normalized = to
+			found = true
+		}
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		next = append(next, normalized)
+	}
+	if !found {
+		return cfg, false
+	}
+	cfg.Domains = next
+	if routes.NormalizeHostname(cfg.DefaultDomain) == from || cfg.DefaultDomain == "" {
+		cfg.DefaultDomain = to
+	}
+	return cfg, true
+}
+
+func parseDomainRename(input string) (string, string, bool) {
+	parts := strings.SplitN(input, "=", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	from := routes.NormalizeHostname(parts[0])
+	to := routes.NormalizeHostname(parts[1])
+	return from, to, from != "" && to != ""
 }
 
 func apiListenIsLoopback(cfg config.Config) bool {
@@ -1342,6 +1884,11 @@ func tunnelNameForFix(cfg config.Config, diag cf.Diagnostic) string {
 	return "vtunnel"
 }
 
+func defaultTunnelCredentialsFile(tunnelID string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cloudflared", strings.TrimSpace(tunnelID)+".json")
+}
+
 func expectedTunnelDNSContent(diag cf.Diagnostic) string {
 	tunnel := strings.TrimSpace(diag.Config.Tunnel)
 	if tunnel == "" {
@@ -1393,24 +1940,4 @@ func expectedDNSContentLabel(content string) string {
 		return "<tunnel>.cfargotunnel.com"
 	}
 	return content
-}
-
-func NewDaemonStore(cfg config.Config) (*daemon.Server, error) {
-	routesPath, err := config.RoutesPath()
-	if err != nil {
-		return nil, err
-	}
-	store, err := routes.NewStore(routesPath)
-	if err != nil {
-		return nil, err
-	}
-	logsPath, err := config.RequestLogsPath()
-	if err != nil {
-		return nil, err
-	}
-	logStore, err := requestlog.NewStore(logsPath, 500)
-	if err != nil {
-		return nil, err
-	}
-	return daemon.New(cfg, store, logStore, nil), nil
 }
