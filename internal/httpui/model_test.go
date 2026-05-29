@@ -33,7 +33,7 @@ func TestRenderDashboard(t *testing.T) {
 		}},
 		Width: 110,
 	}))
-	for _, want := range []string{"vtunnel http", "Tunnels", "Details", "Logs", "Metrics", "web", "https://web.example.test", "/api/login"} {
+	for _, want := range []string{"vtunnel http", "Tunnels", "Overview", "Traffic", "Cloudflare edge", "Requests", "web", "https://web.example.test", "/api/login"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output does not contain %q:\n%s", want, output)
 		}

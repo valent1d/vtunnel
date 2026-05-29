@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"vtunnel/internal/api"
+	"vtunnel/internal/cloudflared"
 	"vtunnel/internal/config"
 	"vtunnel/internal/requestlog"
 	"vtunnel/internal/routes"
@@ -81,6 +82,7 @@ type Model struct {
 
 	routes           []routes.Route
 	logs             []requestlog.Entry
+	edge             cloudflared.EdgeStatus
 	selected         int
 	selectedHostname string
 	lastLogID        uint64
@@ -140,6 +142,10 @@ type stopMsg struct {
 	err      error
 }
 
+type edgeMsg struct {
+	status cloudflared.EdgeStatus
+}
+
 type tickMsg time.Time
 
 func Run(ctx context.Context, cfg config.Config, selectedHostname string) error {
@@ -180,7 +186,7 @@ func NewModel(client client, cfg config.Config, selectedHostname string) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchRoutes(), m.tick())
+	return tea.Batch(m.fetchRoutes(), m.fetchEdge(), m.tick())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -244,8 +250,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeDashboard
 		m.selectAfterStop(msg.hostname)
 		return m, m.fetchRoutes()
+	case edgeMsg:
+		m.edge = msg.status
+		return m, nil
 	case tickMsg:
-		return m, tea.Batch(m.fetchRoutes(), m.tick())
+		return m, tea.Batch(m.fetchRoutes(), m.fetchEdge(), m.tick())
 	}
 	return m, nil
 }
@@ -531,8 +540,21 @@ func (m Model) fetchLogs() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		logs, err := m.client.ListLogs(ctx, requestlog.Filter{Hostname: hostname, Limit: 100})
+		logs, err := m.client.ListLogs(ctx, requestlog.Filter{Hostname: hostname, Limit: 500})
 		return logsMsg{hostname: hostname, logs: logs, err: err}
+	}
+}
+
+// fetchEdge parses cloudflared's log for current edge connections. Read errors
+// (e.g. the log doesn't exist yet) yield an empty status rather than an error.
+func (m Model) fetchEdge() tea.Cmd {
+	return func() tea.Msg {
+		path, err := config.CloudflaredLogPath()
+		if err != nil {
+			return edgeMsg{}
+		}
+		status, _ := cloudflared.ParseEdgeStatus(path)
+		return edgeMsg{status: status}
 	}
 }
 
