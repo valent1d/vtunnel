@@ -72,7 +72,7 @@ func TestModelCreateRoute(t *testing.T) {
 	model.subInput.SetValue("web")
 	model.domainInput.SetValue("example.test")
 
-	updated, cmd := model.Update(key("enter"))
+	updated, cmd := model.Update(press("enter"))
 	if cmd == nil {
 		t.Fatal("expected create command")
 	}
@@ -111,13 +111,13 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 	model.logs = client.logs
 	model.focus = focusLogs
 
-	updated, _ := model.Update(key("down"))
+	updated, _ := model.Update(press("down"))
 	model = updated.(Model)
 	if model.logSelected != 1 {
 		t.Fatalf("logSelected = %d", model.logSelected)
 	}
 
-	updated, _ = model.Update(key("enter"))
+	updated, _ = model.Update(press("enter"))
 	model = updated.(Model)
 	if model.mode != modeRequestDetail {
 		t.Fatalf("mode = %v, want request detail", model.mode)
@@ -128,7 +128,7 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 	}
 }
 
-func key(value string) tea.KeyPressMsg {
+func press(value string) tea.KeyPressMsg {
 	switch value {
 	case "enter":
 		return tea.KeyPressMsg{Code: tea.KeyEnter}

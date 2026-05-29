@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/help"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -34,6 +35,7 @@ func (m Model) View() tea.View {
 		Height:        m.height,
 		SelectedRoute: selectedRoute(m.routes, m.selected),
 		ConfirmCancel: m.confirmCancel,
+		HelpExpanded:  m.helpExpanded,
 	})}
 }
 
@@ -55,6 +57,7 @@ type Snapshot struct {
 	Height        int
 	SelectedRoute routes.Route
 	ConfirmCancel bool
+	HelpExpanded  bool
 }
 
 func Render(snapshot Snapshot) string {
@@ -101,16 +104,16 @@ func Render(snapshot Snapshot) string {
 	if snapshot.Mode == modeRequestDetail {
 		lines = overlayCentered(lines, renderRequestDetail(snapshot, modalWidth(contentWidth)), contentWidth)
 	}
-	if snapshot.Mode == modeHelp {
-		lines = overlayCentered(lines, renderHelp(modalWidth(contentWidth)), contentWidth)
-	}
 	if snapshot.Notice != "" {
 		lines = append(lines, "", okStyle.Render(snapshot.Notice))
 	}
 	if snapshot.Error != "" {
 		lines = append(lines, "", actionStyle.Render(snapshot.Error))
 	}
-	lines = append(lines, "", footerStyle.Render("(http) ↑/↓ navigate   n new   s stop   c url   r refresh   ? help   q quit"))
+	helpBar := help.New()
+	helpBar.ShowAll = snapshot.HelpExpanded
+	helpBar.SetWidth(contentWidth)
+	lines = append(lines, "", helpBar.View(keys))
 	return pageStyle.Render(strings.Join(lines, "\n"))
 }
 
@@ -274,24 +277,6 @@ func renderRequestDetail(snapshot Snapshot, width int) string {
 		mutedStyle.Render("enter/esc close"),
 	}, "\n")
 	return renderBox("Request detail", body, width)
-}
-
-func renderHelp(width int) string {
-	body := strings.Join([]string{
-		"↑/↓ or j/k      Navigate focused pane",
-		"tab             Switch focus between tunnels and logs",
-		"enter           Open selected request detail",
-		"pgup/pgdown     Scroll logs faster",
-		"home/end         Jump logs start/end",
-		"n               Create a tunnel",
-		"s               Stop selected tunnel",
-		"c               Copy public URL",
-		"r               Refresh",
-		"q               Quit",
-		"",
-		mutedStyle.Render("enter/esc close"),
-	}, "\n")
-	return renderBox("Help", body, width)
 }
 
 func overlayCentered(lines []string, modal string, width int) []string {

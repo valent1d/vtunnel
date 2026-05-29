@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"vtunnel/internal/onboarding"
 )
@@ -33,7 +34,7 @@ func TestRenderOnboardingDashboard(t *testing.T) {
 		}},
 	}
 
-	output := Render(Snapshot{Report: report, Width: 100})
+	output := ansi.Strip(Render(Snapshot{Report: report, Width: 100}))
 	for _, want := range []string{"vtunnel", "onboarding", "Status", "Setup path", "Current step", "Actions", "Local checks", "cloudflared", "Start vtunnel daemon", "Continue", "enter select"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output does not contain %q:\n%s", want, output)
@@ -123,7 +124,7 @@ func TestModelContinueActionAdvancesStep(t *testing.T) {
 	model.report = engine.report
 	model.actionIndex = 1
 
-	updated, cmd := model.Update(key("enter"))
+	updated, cmd := model.Update(press("enter"))
 	if cmd != nil {
 		t.Fatal("continue should not execute a command")
 	}
@@ -177,7 +178,7 @@ func TestModelManageDomainsActionOpensPopup(t *testing.T) {
 	model := NewModel(engine)
 	model.report = engine.report
 
-	updated, cmd := model.Update(key("enter"))
+	updated, cmd := model.Update(press("enter"))
 	if cmd != nil {
 		t.Fatal("manage domains should not execute a command")
 	}
@@ -228,7 +229,7 @@ func TestModelManageTunnelsActionOpensPopup(t *testing.T) {
 	model := NewModel(engine)
 	model.report = engine.report
 
-	updated, cmd := model.Update(key("enter"))
+	updated, cmd := model.Update(press("enter"))
 	if cmd != nil {
 		t.Fatal("manage tunnels should not execute a command")
 	}
@@ -253,7 +254,7 @@ func TestModelConfirmsMutatingAction(t *testing.T) {
 	model := NewModel(engine)
 	model.report = engine.report
 
-	updated, cmd := model.Update(key("enter"))
+	updated, cmd := model.Update(press("enter"))
 	if cmd != nil {
 		t.Fatal("enter should only enter confirmation mode")
 	}
@@ -262,7 +263,7 @@ func TestModelConfirmsMutatingAction(t *testing.T) {
 		t.Fatal("expected confirmation mode")
 	}
 
-	updated, cmd = model.Update(key("y"))
+	updated, cmd = model.Update(press("y"))
 	if cmd == nil {
 		t.Fatal("confirm should execute action")
 	}
@@ -288,7 +289,7 @@ func TestFinishOnLastStepQuitsAndRecaps(t *testing.T) {
 	model.report = report
 	model.stepIndex = 1 // last step: the "Finish" action
 
-	updated, cmd := model.Update(key("enter"))
+	updated, cmd := model.Update(press("enter"))
 	model = updated.(Model)
 
 	if !model.finished {
@@ -320,21 +321,21 @@ func TestConfirmButtonsRespectFocus(t *testing.T) {
 	model.report = engine.report
 
 	// enter opens the confirmation with Confirm focused (non-destructive default).
-	updated, _ := model.Update(key("enter"))
+	updated, _ := model.Update(press("enter"))
 	model = updated.(Model)
 	if !model.confirming || model.confirmCancel {
 		t.Fatalf("want confirming with Confirm focused, got confirming=%v cancel=%v", model.confirming, model.confirmCancel)
 	}
 
 	// "l" toggles focus to Cancel.
-	updated, _ = model.Update(key("l"))
+	updated, _ = model.Update(press("l"))
 	model = updated.(Model)
 	if !model.confirmCancel {
 		t.Fatal("want Cancel focused after toggle")
 	}
 
 	// enter on Cancel closes without executing.
-	updated, cmd := model.Update(key("enter"))
+	updated, cmd := model.Update(press("enter"))
 	model = updated.(Model)
 	if cmd != nil {
 		t.Fatal("enter on Cancel must not execute")
@@ -347,7 +348,29 @@ func TestConfirmButtonsRespectFocus(t *testing.T) {
 	}
 }
 
-func key(value string) tea.KeyPressMsg {
+func TestHelpKeyTogglesFullHelp(t *testing.T) {
+	report := onboarding.Report{Phases: []onboarding.Phase{{Title: "Runtime"}}}
+	model := NewModel(&fakeEngine{report: report})
+	model.report = report
+
+	updated, _ := model.Update(press("?"))
+	model = updated.(Model)
+	if !model.helpExpanded {
+		t.Fatal("? should expand the help bar")
+	}
+	// "back" only appears in the full help (FullHelp), not the short one.
+	out := ansi.Strip(Render(Snapshot{Report: report, HelpExpanded: true, Width: 100}))
+	if !strings.Contains(out, "back") {
+		t.Fatalf("expanded help should list full-help bindings like 'back':\n%s", out)
+	}
+
+	updated, _ = model.Update(press("?"))
+	if updated.(Model).helpExpanded {
+		t.Fatal("? should collapse the help bar again")
+	}
+}
+
+func press(value string) tea.KeyPressMsg {
 	switch value {
 	case "enter":
 		return tea.KeyPressMsg{Code: tea.KeyEnter}

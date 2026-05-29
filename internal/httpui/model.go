@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
@@ -18,6 +19,54 @@ import (
 	"vtunnel/internal/requestlog"
 	"vtunnel/internal/routes"
 )
+
+// keyMap drives the dashboard's key handling (key.Matches) and the help bar.
+type keyMap struct {
+	Up       key.Binding
+	Down     key.Binding
+	Focus    key.Binding
+	PageUp   key.Binding
+	PageDown key.Binding
+	Home     key.Binding
+	End      key.Binding
+	Open     key.Binding
+	New      key.Binding
+	Stop     key.Binding
+	Copy     key.Binding
+	Refresh  key.Binding
+	Help     key.Binding
+	Quit     key.Binding
+}
+
+func (k keyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Up, k.New, k.Stop, k.Copy, k.Refresh, k.Help, k.Quit}
+}
+
+func (k keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Up, k.Down, k.Focus, k.Open},
+		{k.New, k.Stop, k.Copy, k.Refresh},
+		{k.PageUp, k.PageDown, k.Home, k.End},
+		{k.Help, k.Quit},
+	}
+}
+
+var keys = keyMap{
+	Up:       key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/↓", "navigate")),
+	Down:     key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓", "down")),
+	Focus:    key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch pane")),
+	PageUp:   key.NewBinding(key.WithKeys("pgup", "ctrl+b"), key.WithHelp("pgup", "scroll up")),
+	PageDown: key.NewBinding(key.WithKeys("pgdown", "ctrl+f"), key.WithHelp("pgdn", "scroll down")),
+	Home:     key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "logs start")),
+	End:      key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "logs end")),
+	Open:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "request detail")),
+	New:      key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
+	Stop:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stop")),
+	Copy:     key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "url")),
+	Refresh:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+	Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	Quit:     key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
+}
 
 type client interface {
 	ListRoutes(context.Context) ([]routes.Route, error)
@@ -51,6 +100,7 @@ type Model struct {
 	err           string
 	quit          bool
 	confirmCancel bool
+	helpExpanded  bool
 }
 
 type mode int
@@ -60,7 +110,6 @@ const (
 	modeCreate
 	modeConfirmStop
 	modeRequestDetail
-	modeHelp
 )
 
 type focus int
@@ -146,7 +195,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateCreate(msg)
 		case modeConfirmStop:
 			return m.updateConfirmStop(msg)
-		case modeRequestDetail, modeHelp:
+		case modeRequestDetail:
 			if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "q" {
 				m.mode = modeDashboard
 			}
@@ -202,41 +251,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "esc", "ctrl+c":
+	switch {
+	case key.Matches(msg, keys.Help):
+		m.helpExpanded = !m.helpExpanded
+		return m, nil
+	case key.Matches(msg, keys.Quit):
 		m.quit = true
 		return m, tea.Quit
-	case "tab":
+	case key.Matches(msg, keys.Focus):
 		if m.focus == focusTunnels {
 			m.focus = focusLogs
 		} else {
 			m.focus = focusTunnels
 		}
 		return m, nil
-	case "down", "j":
+	case key.Matches(msg, keys.Down):
 		return m.moveDown()
-	case "up", "k":
+	case key.Matches(msg, keys.Up):
 		return m.moveUp()
-	case "pgdown", "ctrl+f":
+	case key.Matches(msg, keys.PageDown):
 		m.logOffset = clamp(m.logOffset+10, 0, max(0, len(m.logs)-1))
 		m.clampLogState()
 		return m, nil
-	case "pgup", "ctrl+b":
+	case key.Matches(msg, keys.PageUp):
 		m.logOffset = clamp(m.logOffset-10, 0, max(0, len(m.logs)-1))
 		m.clampLogState()
 		return m, nil
-	case "home":
+	case key.Matches(msg, keys.Home):
 		m.logOffset = 0
 		m.logSelected = 0
 		return m, nil
-	case "end":
+	case key.Matches(msg, keys.End):
 		m.logOffset = max(0, len(m.logs)-1)
 		m.logSelected = 0
 		m.clampLogState()
 		return m, nil
-	case "r":
+	case key.Matches(msg, keys.Refresh):
 		return m, m.fetchRoutes()
-	case "n":
+	case key.Matches(msg, keys.New):
 		m.mode = modeCreate
 		m.createStep = 0
 		m.portInput.SetValue("")
@@ -244,14 +296,14 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.domainInput.SetValue(defaultDomain(m.cfg))
 		m.focusCreateInput()
 		return m, nil
-	case "s":
+	case key.Matches(msg, keys.Stop):
 		if m.currentHostname() == "" {
 			return m, nil
 		}
 		m.mode = modeConfirmStop
 		m.confirmCancel = true // stopping is destructive: default to Cancel
 		return m, nil
-	case "c":
+	case key.Matches(msg, keys.Copy):
 		if host := m.currentHostname(); host != "" {
 			url := "https://" + host
 			if err := copyToClipboard(url); err != nil {
@@ -263,13 +315,10 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = ""
 		}
 		return m, nil
-	case "enter":
+	case key.Matches(msg, keys.Open):
 		if m.focus == focusLogs && len(m.logs) > 0 {
 			m.mode = modeRequestDetail
 		}
-		return m, nil
-	case "?":
-		m.mode = modeHelp
 		return m, nil
 	}
 	return m, nil

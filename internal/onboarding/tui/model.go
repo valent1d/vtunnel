@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -16,6 +18,42 @@ import (
 type engine interface {
 	Report(context.Context) onboarding.Report
 	Execute(context.Context, string, string) (string, error)
+}
+
+// keyMap is the single source of truth for the wizard's key bindings: it drives
+// both the key handling (via key.Matches) and the help bar (via bubbles/help).
+type keyMap struct {
+	Next    key.Binding
+	Back    key.Binding
+	Up      key.Binding
+	Down    key.Binding
+	Select  key.Binding
+	Recheck key.Binding
+	Help    key.Binding
+	Quit    key.Binding
+}
+
+func (k keyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Next, k.Select, k.Up, k.Recheck, k.Help, k.Quit}
+}
+
+func (k keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Next, k.Back},
+		{k.Up, k.Down, k.Select},
+		{k.Recheck, k.Help, k.Quit},
+	}
+}
+
+var keys = keyMap{
+	Next:    key.NewBinding(key.WithKeys("tab", "right", "l", "n"), key.WithHelp("tab", "next")),
+	Back:    key.NewBinding(key.WithKeys("shift+tab", "left", "h", "p"), key.WithHelp("shift+tab", "back")),
+	Up:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/↓", "action")),
+	Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓", "down")),
+	Select:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
+	Recheck: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "recheck")),
+	Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	Quit:    key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
 }
 
 type Model struct {
@@ -32,6 +70,7 @@ type Model struct {
 	inputAction   *onboarding.Action
 	inputPrefix   string
 	input         textinput.Model
+	helpExpanded  bool
 	notice        string
 	err           string
 	quitting      bool
@@ -151,25 +190,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.confirming {
 			return m.updateConfirm(msg)
 		}
-		switch msg.String() {
-		case "q", "esc", "ctrl+c":
+		switch {
+		case key.Matches(msg, keys.Help):
+			m.helpExpanded = !m.helpExpanded
+			return m, nil
+		case key.Matches(msg, keys.Quit):
 			m.quitting = true
 			return m, tea.Quit
-		case "right", "l", "tab", "n":
+		case key.Matches(msg, keys.Next):
 			m.stepIndex = clamp(m.stepIndex+1, 0, len(stepsForReport(m.report))-1)
 			m.actionIndex = 0
 			return m, nil
-		case "left", "h", "shift+tab", "p":
+		case key.Matches(msg, keys.Back):
 			m.stepIndex = clamp(m.stepIndex-1, 0, len(stepsForReport(m.report))-1)
 			m.actionIndex = 0
 			return m, nil
-		case "down", "j":
+		case key.Matches(msg, keys.Down):
 			m.actionIndex = clamp(m.actionIndex+1, 0, len(currentActions(m.report, m.stepIndex))-1)
 			return m, nil
-		case "up", "k":
+		case key.Matches(msg, keys.Up):
 			m.actionIndex = clamp(m.actionIndex-1, 0, len(currentActions(m.report, m.stepIndex))-1)
 			return m, nil
-		case "enter":
+		case key.Matches(msg, keys.Select):
 			actions := currentActions(m.report, m.stepIndex)
 			action, ok := selectedAction(actions, m.actionIndex)
 			if !ok {
@@ -225,7 +267,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.confirming = true
 			m.confirmCancel = false
 			return m, nil
-		case "r":
+		case key.Matches(msg, keys.Recheck):
 			return m, m.fetch()
 		}
 	case reportMsg:
@@ -489,6 +531,7 @@ func (m Model) View() tea.View {
 		Height:        m.height,
 		Booting:       !m.bootDone,
 		BootFrame:     m.bootFrame,
+		HelpExpanded:  m.helpExpanded,
 	})}
 }
 
@@ -547,6 +590,7 @@ type Snapshot struct {
 	Height        int
 	Booting       bool
 	BootFrame     int
+	HelpExpanded  bool
 }
 
 func Render(snapshot Snapshot) string {
@@ -587,7 +631,10 @@ func Render(snapshot Snapshot) string {
 	if snapshot.Error != "" {
 		lines = append(lines, "", renderMessage("Blocked", snapshot.Error, actionStyle, contentWidth))
 	}
-	lines = append(lines, "", footerStyle.Width(contentWidth).Render("tab next   shift+tab back   up/down action   enter select/continue   r recheck   q quit"))
+	helpBar := help.New()
+	helpBar.ShowAll = snapshot.HelpExpanded
+	helpBar.SetWidth(contentWidth)
+	lines = append(lines, "", helpBar.View(keys))
 
 	rendered := strings.Split(strings.Join(lines, "\n"), "\n")
 	if snapshot.DomainManager {
