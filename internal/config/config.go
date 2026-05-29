@@ -84,6 +84,14 @@ func RequestLogsPath() (string, error) {
 	return filepath.Join(logs, "requests.jsonl"), nil
 }
 
+func CloudflaredLogPath() (string, error) {
+	logs, err := LogsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(logs, "cloudflared.log"), nil
+}
+
 func Load(path string) (Config, error) {
 	if path == "" {
 		var err error

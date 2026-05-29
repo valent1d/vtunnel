@@ -1782,9 +1782,5 @@ func startCloudflared(ctx context.Context, cloudflaredPath string, cloudflaredCo
 }
 
 func cloudflaredLogPath() (string, error) {
-	logs, err := config.LogsDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(logs, "cloudflared.log"), nil
+	return config.CloudflaredLogPath()
 }
