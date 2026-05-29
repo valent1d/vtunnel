@@ -1,6 +1,42 @@
 package cloudflared
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestParseEdgeStatusPicksNewestLog(t *testing.T) {
+	dir := t.TempDir()
+	foreground := filepath.Join(dir, "cloudflared.log")
+	service := filepath.Join(dir, "cloudflared.launchd.out.log")
+	if err := os.WriteFile(foreground, []byte("INF Registered tunnel connection connIndex=0 ip=1.1.1.1 location=cdg01 protocol=quic\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(service, []byte("INF Registered tunnel connection connIndex=0 ip=2.2.2.2 location=dfw08 protocol=quic\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Make the service log the most recently written (the active cloudflared).
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(foreground, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := ParseEdgeStatus(foreground, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Connections) != 1 || status.Connections[0].Location != "dfw08" {
+		t.Fatalf("expected newest log (dfw08), got %+v", status.Connections)
+	}
+
+	// Missing paths are skipped rather than erroring.
+	empty, err := ParseEdgeStatus(filepath.Join(dir, "nope.log"))
+	if err != nil || len(empty.Connections) != 0 {
+		t.Fatalf("missing path should be empty/no error, got %+v err=%v", empty, err)
+	}
+}
 
 func TestParseEdgeStatus(t *testing.T) {
 	log := `2026-05-29T12:00:00Z INF Starting tunnel tunnelID=demo-webapp

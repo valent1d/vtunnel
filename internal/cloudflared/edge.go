@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // EdgeConnection is a single live connection from cloudflared to a Cloudflare
@@ -25,10 +26,27 @@ type EdgeStatus struct {
 	Connections []EdgeConnection // current connections, ordered by index
 }
 
-// ParseEdgeStatus reads the cloudflared log file and extracts the current edge
-// connection status. Missing fields are left empty.
-func ParseEdgeStatus(logPath string) (EdgeStatus, error) {
-	data, err := os.ReadFile(logPath)
+// ParseEdgeStatus reads cloudflared's log and extracts the current edge
+// connection status. When several candidate paths are given (e.g. the
+// foreground log and the launchd service log), it parses the most recently
+// written one — that's the cloudflared currently running — so the dashboard
+// works whether cloudflared was started by `vtunnel http` or by the service.
+func ParseEdgeStatus(paths ...string) (EdgeStatus, error) {
+	var best string
+	var bestMod time.Time
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if best == "" || info.ModTime().After(bestMod) {
+			best, bestMod = path, info.ModTime()
+		}
+	}
+	if best == "" {
+		return EdgeStatus{}, nil
+	}
+	data, err := os.ReadFile(best)
 	if err != nil {
 		return EdgeStatus{}, err
 	}

@@ -92,6 +92,16 @@ func CloudflaredLogPath() (string, error) {
 	return filepath.Join(logs, "cloudflared.log"), nil
 }
 
+// CloudflaredServiceLogPath is where the macOS LaunchAgent captures cloudflared's
+// output. The basename must match launchd.CloudflaredSpec's StandardOutPath.
+func CloudflaredServiceLogPath() (string, error) {
+	logs, err := LogsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(logs, "cloudflared.launchd.out.log"), nil
+}
+
 func Load(path string) (Config, error) {
 	if path == "" {
 		var err error

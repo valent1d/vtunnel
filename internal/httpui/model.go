@@ -549,11 +549,14 @@ func (m Model) fetchLogs() tea.Cmd {
 // (e.g. the log doesn't exist yet) yield an empty status rather than an error.
 func (m Model) fetchEdge() tea.Cmd {
 	return func() tea.Msg {
-		path, err := config.CloudflaredLogPath()
-		if err != nil {
-			return edgeMsg{}
+		var paths []string
+		if p, err := config.CloudflaredLogPath(); err == nil {
+			paths = append(paths, p)
 		}
-		status, _ := cloudflared.ParseEdgeStatus(path)
+		if p, err := config.CloudflaredServiceLogPath(); err == nil {
+			paths = append(paths, p)
+		}
+		status, _ := cloudflared.ParseEdgeStatus(paths...)
 		return edgeMsg{status: status}
 	}
 }
