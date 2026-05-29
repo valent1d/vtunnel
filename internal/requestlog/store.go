@@ -16,6 +16,11 @@ import (
 
 const DefaultMaxEntries = 1000
 
+// defaultMaxBytes caps the on-disk request log. The store keeps the last
+// DefaultMaxEntries in memory and rewrites the file from them once it grows past
+// this, so the file never accumulates unbounded history on the user's machine.
+const defaultMaxBytes = 5 << 20 // 5 MiB
+
 type Entry struct {
 	ID         uint64        `json:"id"`
 	Time       time.Time     `json:"time"`
@@ -36,12 +41,14 @@ type Filter struct {
 }
 
 type Store struct {
-	path string
-	max  int
+	path     string
+	max      int
+	maxBytes int64
 
-	mu      sync.RWMutex
-	nextID  uint64
-	entries []Entry
+	mu        sync.RWMutex
+	nextID    uint64
+	entries   []Entry
+	fileBytes int64
 }
 
 func NewStore(path string, maxEntries int) (*Store, error) {
@@ -49,12 +56,16 @@ func NewStore(path string, maxEntries int) (*Store, error) {
 		maxEntries = DefaultMaxEntries
 	}
 	store := &Store{
-		path:   path,
-		max:    maxEntries,
-		nextID: 1,
+		path:     path,
+		max:      maxEntries,
+		maxBytes: defaultMaxBytes,
+		nextID:   1,
 	}
 	if err := store.load(); err != nil {
 		return nil, err
+	}
+	if info, err := os.Stat(path); err == nil {
+		store.fileBytes = info.Size()
 	}
 	return store, nil
 }
@@ -162,5 +173,49 @@ func (s *Store) appendLocked(entry Entry) error {
 	if _, err := file.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write request log %s: %w", s.path, err)
 	}
+	s.fileBytes += int64(len(data) + 1)
+	if s.maxBytes > 0 && s.fileBytes > s.maxBytes {
+		if err := s.rewriteLocked(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rewriteLocked rebuilds the on-disk log from the in-memory (capped) entries,
+// reclaiming the unbounded append history. The daemon is the only writer, so an
+// atomic temp-file rename is safe here.
+func (s *Store) rewriteLocked() error {
+	tmp := s.path + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open request log temp %s: %w", tmp, err)
+	}
+	var written int64
+	writer := bufio.NewWriter(file)
+	for _, entry := range s.entries {
+		data, err := json.Marshal(entry)
+		if err != nil {
+			file.Close()
+			return fmt.Errorf("encode request log: %w", err)
+		}
+		n, err := writer.Write(append(data, '\n'))
+		if err != nil {
+			file.Close()
+			return fmt.Errorf("write request log temp %s: %w", tmp, err)
+		}
+		written += int64(n)
+	}
+	if err := writer.Flush(); err != nil {
+		file.Close()
+		return fmt.Errorf("flush request log temp %s: %w", tmp, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close request log temp %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		return fmt.Errorf("replace request log %s: %w", s.path, err)
+	}
+	s.fileBytes = written
 	return nil
 }
