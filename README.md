@@ -1,11 +1,6 @@
 <div align="center">
 
-```
-  _   __________  ___  ___  ________
- | | / /_  __/ / / / |/ / |/ / __/ /
- | |/ / / / / /_/ /    /    / _// /__
- |___/ /_/  \____/_/|_/_/|_/___/____/
-```
+<img src=".github/vtunnel-logo.svg" alt="vtunnel" width="440">
 
 **Expose your local apps on your own Cloudflare domain — with a polished CLI & TUI.**
 
