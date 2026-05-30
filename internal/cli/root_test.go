@@ -34,8 +34,10 @@ func TestHTTPListStopStatusCommands(t *testing.T) {
 	cfg := config.Default()
 	cfg.DefaultDomain = "example.test"
 	cfg.Domains = []string{"example.test"}
-	cfg.Proxy.Listen = freeLoopbackAddr(t)
-	cfg.API.Listen = freeLoopbackAddr(t)
+	proxyAddr, proxyLn := reserveLoopback(t)
+	apiAddr, apiLn := reserveLoopback(t)
+	cfg.Proxy.Listen = proxyAddr
+	cfg.API.Listen = apiAddr
 	cfg.Cloudflared.ConfigPath = writeReadyCloudflaredConfig(t, tempDir, "11111111-1111-1111-1111-111111111111", "example.test", cfg.Proxy.Listen)
 
 	configPath, err := config.ConfigPath()
@@ -46,7 +48,7 @@ func TestHTTPListStopStatusCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cancel := startDaemon(t, cfg)
+	cancel := startDaemon(t, cfg, proxyLn, apiLn)
 	defer cancel()
 
 	upstream := newCLIUpstream(t)
@@ -141,8 +143,10 @@ func TestDaemonStopCommand(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tempDir)
 
 	cfg := config.Default()
-	cfg.Proxy.Listen = freeLoopbackAddr(t)
-	cfg.API.Listen = freeLoopbackAddr(t)
+	proxyAddr, proxyLn := reserveLoopback(t)
+	apiAddr, apiLn := reserveLoopback(t)
+	cfg.Proxy.Listen = proxyAddr
+	cfg.API.Listen = apiAddr
 
 	configPath, err := config.ConfigPath()
 	if err != nil {
@@ -152,7 +156,7 @@ func TestDaemonStopCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleanup := startDaemon(t, cfg)
+	cleanup := startDaemon(t, cfg, proxyLn, apiLn)
 	defer cleanup()
 
 	out, err := executeCommand(context.Background(), "--config", configPath, "daemon", "stop")
@@ -431,8 +435,10 @@ func TestHTTPCommandStartsCloudflaredWhenStopped(t *testing.T) {
 	cfg := config.Default()
 	cfg.DefaultDomain = "example.test"
 	cfg.Domains = []string{"example.test"}
-	cfg.Proxy.Listen = freeLoopbackAddr(t)
-	cfg.API.Listen = freeLoopbackAddr(t)
+	proxyAddr, proxyLn := reserveLoopback(t)
+	apiAddr, apiLn := reserveLoopback(t)
+	cfg.Proxy.Listen = proxyAddr
+	cfg.API.Listen = apiAddr
 	cfg.Cloudflared.ConfigPath = writeReadyCloudflaredConfig(t, tempDir, "11111111-1111-1111-1111-111111111111", "example.test", cfg.Proxy.Listen)
 
 	configPath, err := config.ConfigPath()
@@ -443,7 +449,7 @@ func TestHTTPCommandStartsCloudflaredWhenStopped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cancel := startDaemon(t, cfg)
+	cancel := startDaemon(t, cfg, proxyLn, apiLn)
 	defer cancel()
 
 	stubCloudflareKeychainToken(t, "", secrets.ErrNotFound)
@@ -503,8 +509,10 @@ func TestHTTPCommandWithoutArgsOpensDashboard(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tempDir)
 
 	cfg := config.Default()
-	cfg.Proxy.Listen = freeLoopbackAddr(t)
-	cfg.API.Listen = freeLoopbackAddr(t)
+	proxyAddr, proxyLn := reserveLoopback(t)
+	apiAddr, apiLn := reserveLoopback(t)
+	cfg.Proxy.Listen = proxyAddr
+	cfg.API.Listen = apiAddr
 
 	configPath, err := config.ConfigPath()
 	if err != nil {
@@ -514,7 +522,7 @@ func TestHTTPCommandWithoutArgsOpensDashboard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cancel := startDaemon(t, cfg)
+	cancel := startDaemon(t, cfg, proxyLn, apiLn)
 	defer cancel()
 
 	previousRun := runHTTPUI
@@ -548,8 +556,10 @@ func TestHTTPCommandWithRouteOpensDashboardSelected(t *testing.T) {
 	cfg := config.Default()
 	cfg.DefaultDomain = "example.test"
 	cfg.Domains = []string{"example.test"}
-	cfg.Proxy.Listen = freeLoopbackAddr(t)
-	cfg.API.Listen = freeLoopbackAddr(t)
+	proxyAddr, proxyLn := reserveLoopback(t)
+	apiAddr, apiLn := reserveLoopback(t)
+	cfg.Proxy.Listen = proxyAddr
+	cfg.API.Listen = apiAddr
 	cfg.Cloudflared.ConfigPath = writeReadyCloudflaredConfig(t, tempDir, "11111111-1111-1111-1111-111111111111", "example.test", cfg.Proxy.Listen)
 
 	configPath, err := config.ConfigPath()
@@ -560,7 +570,7 @@ func TestHTTPCommandWithRouteOpensDashboardSelected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cancel := startDaemon(t, cfg)
+	cancel := startDaemon(t, cfg, proxyLn, apiLn)
 	defer cancel()
 
 	stubCloudflareKeychainToken(t, "", secrets.ErrNotFound)
@@ -1479,7 +1489,7 @@ ingress:
 	return path
 }
 
-func startDaemon(t *testing.T, cfg config.Config) context.CancelFunc {
+func startDaemon(t *testing.T, cfg config.Config, proxyLn, apiLn net.Listener) context.CancelFunc {
 	t.Helper()
 
 	routesPath, err := config.RoutesPath()
@@ -1499,7 +1509,7 @@ func startDaemon(t *testing.T, cfg config.Config) context.CancelFunc {
 	errs := make(chan error, 1)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	go func() {
-		errs <- daemon.New(cfg, store, logStore, logger).Run(ctx)
+		errs <- daemon.New(cfg, store, logStore, logger, daemon.WithListeners(proxyLn, apiLn)).Run(ctx)
 	}()
 
 	waitForHealth(t, api.New(cfg))
@@ -1569,4 +1579,18 @@ func freeLoopbackAddr(t *testing.T) string {
 	}
 	defer listener.Close()
 	return listener.Addr().String()
+}
+
+// reserveLoopback binds a loopback listener and keeps it open (closed on
+// cleanup). Handing the listener to the daemon via daemon.WithListeners avoids
+// the bind-after-close port race that flakes under parallel test execution.
+func reserveLoopback(t *testing.T) (string, net.Listener) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener.Addr().String(), listener
 }

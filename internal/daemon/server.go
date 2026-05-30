@@ -24,19 +24,34 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	routes    *routes.Store
-	logs      *requestlog.Store
-	exchanges *requestlog.ExchangeStore
-	bodyLimit int
-	logger    *slog.Logger
+	cfg           config.Config
+	routes        *routes.Store
+	logs          *requestlog.Store
+	exchanges     *requestlog.ExchangeStore
+	bodyLimit     int
+	logger        *slog.Logger
+	proxyListener net.Listener
+	apiListener   net.Listener
 }
 
-func New(cfg config.Config, routeStore *routes.Store, logStore *requestlog.Store, logger *slog.Logger) *Server {
+// Option configures a Server.
+type Option func(*Server)
+
+// WithListeners makes Run serve on pre-bound listeners instead of binding the
+// configured addresses. Tests use it to avoid the bind-after-close port race;
+// both listeners must be loopback.
+func WithListeners(proxy, api net.Listener) Option {
+	return func(s *Server) {
+		s.proxyListener = proxy
+		s.apiListener = api
+	}
+}
+
+func New(cfg config.Config, routeStore *routes.Store, logStore *requestlog.Store, logger *slog.Logger, opts ...Option) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{
+	server := &Server{
 		cfg:       cfg,
 		routes:    routeStore,
 		logs:      logStore,
@@ -44,6 +59,10 @@ func New(cfg config.Config, routeStore *routes.Store, logStore *requestlog.Store
 		bodyLimit: requestlog.DefaultBodyCaptureLimit,
 		logger:    logger,
 	}
+	for _, opt := range opts {
+		opt(server)
+	}
+	return server
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -51,24 +70,32 @@ func (s *Server) Run(ctx context.Context) error {
 	defer stop()
 
 	proxyServer := &http.Server{
-		Addr:              s.cfg.Proxy.Listen,
 		Handler:           s.proxyHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	apiServer := &http.Server{
-		Addr:              s.cfg.API.Listen,
 		Handler:           s.apiHandler(stop),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	proxyListener, err := loopbackListener(s.proxyListener, s.cfg.Proxy.Listen)
+	if err != nil {
+		return err
+	}
+	apiListener, err := loopbackListener(s.apiListener, s.cfg.API.Listen)
+	if err != nil {
+		_ = proxyListener.Close()
+		return err
+	}
+
 	errs := make(chan error, 2)
 	go func() {
-		s.logger.Info("proxy listening", "addr", s.cfg.Proxy.Listen)
-		errs <- listenAndServeLocal(proxyServer)
+		s.logger.Info("proxy listening", "addr", proxyListener.Addr().String())
+		errs <- serveUntilClosed(proxyServer, proxyListener)
 	}()
 	go func() {
-		s.logger.Info("api listening", "addr", s.cfg.API.Listen)
-		errs <- listenAndServeLocal(apiServer)
+		s.logger.Info("api listening", "addr", apiListener.Addr().String())
+		errs <- serveUntilClosed(apiServer, apiListener)
 	}()
 	go s.runLogJanitor(runCtx)
 
@@ -118,16 +145,36 @@ func (s *Server) runLogJanitor(ctx context.Context) {
 	}
 }
 
-func listenAndServeLocal(server *http.Server) error {
-	host, _, err := net.SplitHostPort(server.Addr)
+// loopbackListener returns the injected listener when present (validated as
+// loopback), otherwise binds the configured address. Binding here — rather than
+// via http.Server.ListenAndServe — lets tests hand in a pre-bound listener and
+// avoid the bind-after-close port race.
+func loopbackListener(injected net.Listener, addr string) (net.Listener, error) {
+	if injected != nil {
+		if err := requireLoopback(injected.Addr().String()); err != nil {
+			return nil, err
+		}
+		return injected, nil
+	}
+	if err := requireLoopback(addr); err != nil {
+		return nil, err
+	}
+	return net.Listen("tcp", addr)
+}
+
+func requireLoopback(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("invalid listen address %q: %w", server.Addr, err)
+		return fmt.Errorf("invalid listen address %q: %w", addr, err)
 	}
 	if host != "127.0.0.1" {
-		return fmt.Errorf("refusing to bind local API/proxy to non-local address %q", server.Addr)
+		return fmt.Errorf("refusing to bind local API/proxy to non-local address %q", addr)
 	}
+	return nil
+}
 
-	err = server.ListenAndServe()
+func serveUntilClosed(server *http.Server, listener net.Listener) error {
+	err := server.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

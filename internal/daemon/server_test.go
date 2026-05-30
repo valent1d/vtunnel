@@ -51,9 +51,11 @@ func TestServerRoutesProxyRequestsByHost(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	proxyAddr, proxyLn := reserveLoopback(t)
+	apiAddr, apiLn := reserveLoopback(t)
 	cfg := config.Default()
-	cfg.Proxy.Listen = freeLoopbackAddr(t)
-	cfg.API.Listen = freeLoopbackAddr(t)
+	cfg.Proxy.Listen = proxyAddr
+	cfg.API.Listen = apiAddr
 
 	store, err := routes.NewStore(filepath.Join(t.TempDir(), "routes.json"))
 	if err != nil {
@@ -70,7 +72,7 @@ func TestServerRoutesProxyRequestsByHost(t *testing.T) {
 	errs := make(chan error, 1)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	go func() {
-		errs <- New(cfg, store, logStore, logger).Run(ctx)
+		errs <- New(cfg, store, logStore, logger, WithListeners(proxyLn, apiLn)).Run(ctx)
 	}()
 
 	client := api.New(cfg)
@@ -141,9 +143,11 @@ func TestServerCapturesAndReplaysRequest(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	proxyAddr, proxyLn := reserveLoopback(t)
+	apiAddr, apiLn := reserveLoopback(t)
 	cfg := config.Default()
-	cfg.Proxy.Listen = freeLoopbackAddr(t)
-	cfg.API.Listen = freeLoopbackAddr(t)
+	cfg.Proxy.Listen = proxyAddr
+	cfg.API.Listen = apiAddr
 
 	store, err := routes.NewStore(filepath.Join(t.TempDir(), "routes.json"))
 	if err != nil {
@@ -157,7 +161,7 @@ func TestServerCapturesAndReplaysRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	go func() { _ = New(cfg, store, logStore, logger).Run(ctx) }()
+	go func() { _ = New(cfg, store, logStore, logger, WithListeners(proxyLn, apiLn)).Run(ctx) }()
 
 	client := api.New(cfg)
 	waitForHealth(t, client)
@@ -290,6 +294,21 @@ func freeLoopbackAddr(t *testing.T) string {
 	}
 	defer listener.Close()
 	return listener.Addr().String()
+}
+
+// reserveLoopback binds a loopback listener and keeps it open (closed on
+// cleanup), returning its address and the listener. Passing the listener to the
+// server via WithListeners avoids the bind-after-close race that flakes under
+// parallel test execution.
+func reserveLoopback(t *testing.T) (string, net.Listener) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener.Addr().String(), listener
 }
 
 func waitForHealth(t *testing.T, client *api.Client) {
