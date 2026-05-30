@@ -32,6 +32,7 @@ type keyMap struct {
 	End      key.Binding
 	Open     key.Binding
 	New      key.Binding
+	Access   key.Binding
 	Stop     key.Binding
 	Copy     key.Binding
 	Refresh  key.Binding
@@ -40,13 +41,13 @@ type keyMap struct {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.New, k.Stop, k.Copy, k.Refresh, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.New, k.Access, k.Stop, k.Copy, k.Refresh, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Focus, k.Open},
-		{k.New, k.Stop, k.Copy, k.Refresh},
+		{k.New, k.Access, k.Stop, k.Copy, k.Refresh},
 		{k.PageUp, k.PageDown, k.Home, k.End},
 		{k.Help, k.Quit},
 	}
@@ -62,6 +63,7 @@ var keys = keyMap{
 	End:      key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "logs end")),
 	Open:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "request detail")),
 	New:      key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
+	Access:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "access")),
 	Stop:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stop")),
 	Copy:     key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "url")),
 	Refresh:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
@@ -94,11 +96,25 @@ type Model struct {
 	width            int
 	height           int
 
-	mode        mode
-	createStep  int
-	portInput   textinput.Model
-	subInput    textinput.Model
-	domainInput textinput.Model
+	mode          mode
+	createStep    int
+	createProtect string // protection mode key chosen in the create flow ("public" = none)
+	portInput     textinput.Model
+	subInput      textinput.Model
+	domainInput   textinput.Model
+
+	access             AccessController
+	accessModes        []string // available mode keys in panel order (public/sso/otp)
+	accessMode         int      // index into accessModes
+	accessIdPs         []string // SSO identity-provider names
+	accessIdPIndex     int      // selected identity provider
+	accessFocus        int      // index into the focusable widgets of the Access form
+	accessBusy         bool
+	accessErr          string
+	accessTarget       string // hostname the panel operates on (stable across refreshes)
+	accessPaused       bool   // whether the target is currently paused
+	accessWasProtected bool   // whether the target was protected when the panel opened
+	allowInput         textinput.Model
 
 	notice        string
 	err           string
@@ -117,6 +133,7 @@ const (
 	modeCreate
 	modeConfirmStop
 	modeRequestDetail
+	modeAccess
 )
 
 type focus int
@@ -164,16 +181,16 @@ type replayMsg struct {
 
 type tickMsg time.Time
 
-func Run(ctx context.Context, cfg config.Config, selectedHostname string) error {
+func Run(ctx context.Context, cfg config.Config, selectedHostname string, access AccessController) error {
 	program := tea.NewProgram(
-		NewModel(api.New(cfg), cfg, selectedHostname),
+		NewModel(api.New(cfg), cfg, selectedHostname, access),
 		tea.WithContext(ctx),
 	)
 	_, err := program.Run()
 	return err
 }
 
-func NewModel(client client, cfg config.Config, selectedHostname string) Model {
+func NewModel(client client, cfg config.Config, selectedHostname string, access AccessController) Model {
 	portInput := textinput.New()
 	portInput.Placeholder = "3000"
 	portInput.CharLimit = 5
@@ -189,9 +206,15 @@ func NewModel(client client, cfg config.Config, selectedHostname string) Model {
 	domainInput.CharLimit = 253
 	domainInput.SetWidth(32)
 
+	allowInput := textinput.New()
+	allowInput.Placeholder = "you@example.com or @example.com"
+	allowInput.CharLimit = 253
+	allowInput.SetWidth(34)
+
 	return Model{
 		client:           client,
 		cfg:              cfg,
+		access:           access,
 		selectedHostname: routes.NormalizeHostname(selectedHostname),
 		width:            100,
 		height:           30,
@@ -199,11 +222,12 @@ func NewModel(client client, cfg config.Config, selectedHostname string) Model {
 		portInput:        portInput,
 		subInput:         subInput,
 		domainInput:      domainInput,
+		allowInput:       allowInput,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchRoutes(), m.fetchEdge(), m.tick())
+	return tea.Batch(m.fetchRoutes(), m.fetchEdge(), m.fetchAccessIdPs(), m.tick())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -218,6 +242,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateCreate(msg)
 		case modeConfirmStop:
 			return m.updateConfirmStop(msg)
+		case modeAccess:
+			return m.updateAccess(msg)
 		case modeRequestDetail:
 			switch msg.String() {
 			case "esc", "enter", "q":
@@ -265,10 +291,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.notice = "Created " + msg.hostname
 		m.selectedHostname = msg.hostname
-		m.mode = modeDashboard
 		m.focus = focusLogs
 		m.logCursor = 0
 		m.logFollow = true
+		// If the user chose protection in the create form, jump straight to the
+		// Access panel (pre-filled) to finish setting allow/idp.
+		if m.createProtect != "public" && m.access != nil {
+			m.prepareAccessForCreate(msg.hostname, m.createProtect)
+		} else {
+			m.mode = modeDashboard
+		}
 		return m, m.fetchRoutes()
 	case exchangeMsg:
 		// Ignore a stale fetch if the user already closed/changed the detail.
@@ -291,6 +323,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = fmt.Sprintf("Replayed request #%d", msg.id)
 		m.err = ""
 		return m, m.fetchLogs()
+	case idpsMsg:
+		m.accessIdPs = msg.names
+		if m.mode == modeAccess {
+			m.rebuildAccessModes()
+		}
+		return m, nil
+	case accessResultMsg:
+		m.accessBusy = false
+		if msg.err != nil {
+			m.accessErr = msg.err.Error()
+			return m, nil
+		}
+		m.mode = modeDashboard
+		m.notice = msg.notice
+		m.err = ""
+		return m, m.fetchRoutes()
 	case stopMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
@@ -347,11 +395,17 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.New):
 		m.mode = modeCreate
 		m.createStep = 0
+		m.createProtect = "public"
 		m.portInput.SetValue("")
 		m.subInput.SetValue("")
 		m.domainInput.SetValue(defaultDomain(m.cfg))
 		m.focusCreateInput()
 		return m, nil
+	case key.Matches(msg, keys.Access):
+		if m.currentHostname() == "" || m.access == nil {
+			return m, nil
+		}
+		return m.openAccessPanel()
 	case key.Matches(msg, keys.Stop):
 		if m.currentHostname() == "" {
 			return m, nil
@@ -425,15 +479,25 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeDashboard
 		return m, nil
 	case "tab", "down":
-		m.createStep = clamp(m.createStep+1, 0, 2)
+		m.createStep = clamp(m.createStep+1, 0, 3)
 		m.focusCreateInput()
 		return m, nil
 	case "shift+tab", "up":
-		m.createStep = clamp(m.createStep-1, 0, 2)
+		m.createStep = clamp(m.createStep-1, 0, 3)
 		m.focusCreateInput()
 		return m, nil
+	case "left":
+		if m.createStep == 3 {
+			m.createProtect = cycleMode(m.createProtect, -1, len(m.accessIdPs) > 0)
+		}
+		return m, nil
+	case "right":
+		if m.createStep == 3 {
+			m.createProtect = cycleMode(m.createProtect, 1, len(m.accessIdPs) > 0)
+		}
+		return m, nil
 	case "enter":
-		if m.createStep < 2 {
+		if m.createStep < 3 {
 			m.createStep++
 			m.focusCreateInput()
 			return m, nil
@@ -451,7 +515,7 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.portInput, cmd = m.portInput.Update(msg)
 	case 1:
 		m.subInput, cmd = m.subInput.Update(msg)
-	default:
+	case 2:
 		m.domainInput, cmd = m.domainInput.Update(msg)
 	}
 	return m, cmd
@@ -539,8 +603,9 @@ func (m *Model) focusCreateInput() {
 		m.portInput.Focus()
 	case 1:
 		m.subInput.Focus()
-	default:
+	case 2:
 		m.domainInput.Focus()
+		// step 3 = protect selector, no text input focused
 	}
 }
 

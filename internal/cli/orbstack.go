@@ -311,7 +311,7 @@ func exposeOrbstackContainer(cmd *cobra.Command, configPath *string, container o
 	if detach {
 		return nil
 	}
-	return runHTTPUI(cmd.Context(), cfg, hostname)
+	return runHTTPUI(cmd.Context(), cfg, hostname, accessControllerFor(cfg))
 }
 
 // exposedTargets maps an OrbStack domain to the public hostname currently

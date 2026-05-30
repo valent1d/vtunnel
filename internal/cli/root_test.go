@@ -23,6 +23,7 @@ import (
 	cf "vtunnel/internal/cloudflared"
 	"vtunnel/internal/config"
 	"vtunnel/internal/daemon"
+	"vtunnel/internal/httpui"
 	"vtunnel/internal/routes"
 	"vtunnel/internal/secrets"
 )
@@ -541,7 +542,7 @@ func TestHTTPCommandWithoutArgsOpensDashboard(t *testing.T) {
 
 	previousRun := runHTTPUI
 	var opened bool
-	runHTTPUI = func(_ context.Context, got config.Config, selected string) error {
+	runHTTPUI = func(_ context.Context, got config.Config, selected string, _ httpui.AccessController) error {
 		opened = true
 		if got.API.Listen != cfg.API.Listen {
 			t.Fatalf("API listen = %q", got.API.Listen)
@@ -604,7 +605,7 @@ func TestHTTPCommandWithRouteOpensDashboardSelected(t *testing.T) {
 
 	previousRun := runHTTPUI
 	var selectedHostname string
-	runHTTPUI = func(_ context.Context, _ config.Config, selected string) error {
+	runHTTPUI = func(_ context.Context, _ config.Config, selected string, _ httpui.AccessController) error {
 		selectedHostname = selected
 		return nil
 	}

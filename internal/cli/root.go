@@ -527,7 +527,7 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 				if err := ensureDaemon(cmd.Context(), cfg, *configPath); err != nil {
 					return err
 				}
-				return runHTTPUI(cmd.Context(), cfg, "")
+				return runHTTPUI(cmd.Context(), cfg, "", accessControllerFor(cfg))
 			}
 
 			var routeTarget, subdomain string
@@ -597,13 +597,13 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 			if detach {
 				return nil
 			}
-			return runHTTPUI(cmd.Context(), cfg, hostname)
+			return runHTTPUI(cmd.Context(), cfg, hostname, accessControllerFor(cfg))
 		},
 	}
 	cmd.Flags().StringVar(&domain, "domain", "", "domain to use for this route")
 	cmd.Flags().BoolVar(&detach, "detach", false, "create the route and return instead of following request logs")
 	cmd.Flags().StringVar(&target, "target", "", "upstream URL or host:port to forward to (instead of a local port)")
-	cmd.Flags().StringVar(&protect, "protect", "otp", "protect with Cloudflare Access: otp | email | sso")
+	cmd.Flags().StringVar(&protect, "protect", "otp", "protect with Cloudflare Access: otp | sso")
 	cmd.Flags().Lookup("protect").NoOptDefVal = "otp"
 	cmd.Flags().StringArrayVar(&allow, "allow", nil, "who may sign in: an email, @domain, or everyone (repeatable)")
 	cmd.Flags().StringVar(&protectIdP, "idp", "", "identity provider name for --protect=sso")

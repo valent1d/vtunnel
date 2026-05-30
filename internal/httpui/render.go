@@ -41,7 +41,19 @@ func (m Model) View() tea.View {
 		Edge:          m.edge,
 		Detail:        m.detail,
 		DetailErr:     m.detailErr,
-		Now:           time.Now(),
+		CreateProtectLabel: accessModeLabel[m.createProtect],
+		AccessModes:        m.accessModes,
+		AccessMode:         m.accessMode,
+		AccessField:        m.accessFocus,
+		AccessHost:         m.accessTarget,
+		AccessProtected:    m.accessWasProtected,
+		AccessPaused:       m.accessPaused,
+		AccessIdPs:         m.accessIdPs,
+		AccessIdPIndex:     m.accessIdPIndex,
+		AllowInput:         m.allowInput.View(),
+		AccessBusy:         m.accessBusy,
+		AccessErr:          m.accessErr,
+		Now:                time.Now(),
 	})}
 }
 
@@ -67,6 +79,18 @@ type Snapshot struct {
 	Now           time.Time
 	Detail        *requestlog.Exchange
 	DetailErr     string
+	CreateProtectLabel string
+	AccessModes        []string
+	AccessMode         int
+	AccessField        int
+	AccessHost         string
+	AccessProtected    bool
+	AccessPaused       bool
+	AccessIdPs         []string
+	AccessIdPIndex     int
+	AllowInput         string
+	AccessBusy         bool
+	AccessErr          string
 }
 
 func Render(snapshot Snapshot) string {
@@ -121,6 +145,9 @@ func Render(snapshot Snapshot) string {
 	}
 	if snapshot.Mode == modeRequestDetail {
 		lines = overlayCentered(lines, renderRequestDetail(snapshot, modalWidth(contentWidth)), contentWidth)
+	}
+	if snapshot.Mode == modeAccess {
+		lines = overlayCentered(lines, renderAccessPanel(snapshot, modalWidth(contentWidth)), contentWidth)
 	}
 	if snapshot.Notice != "" {
 		lines = append(lines, "", okStyle.Render(snapshot.Notice))
@@ -363,12 +390,19 @@ func renderLogs(snapshot Snapshot, width int, rows int) string {
 }
 
 func renderCreateForm(snapshot Snapshot, width int) string {
+	protectValue := snapshot.CreateProtectLabel
+	if snapshot.CreateStep == 3 {
+		protectValue = commandStyle.Render("◂ "+protectValue+" ▸")
+	} else {
+		protectValue = mutedStyle.Render(protectValue)
+	}
 	rows := []string{
 		createRow("Port", snapshot.PortInput, snapshot.CreateStep == 0),
 		createRow("Subdomain", snapshot.SubInput, snapshot.CreateStep == 1),
 		createRow("Domain", snapshot.DomainInput, snapshot.CreateStep == 2),
+		createRow("Protect", protectValue, snapshot.CreateStep == 3),
 		"",
-		mutedStyle.Render("enter next/create   tab move   esc cancel"),
+		mutedStyle.Render("enter next/create   tab move   ◂/▸ protection   esc cancel"),
 	}
 	return renderBox("New tunnel", strings.Join(rows, "\n"), width)
 }

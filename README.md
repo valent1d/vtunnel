@@ -131,18 +131,26 @@ vtunnel logs --limit 100  # more history
 Exposed routes are public by default. [Cloudflare Access](https://www.cloudflare.com/zero-trust/products/access/) (Zero Trust) puts a login page at the **edge** — before traffic reaches your local app — so only the people you allow get in. It's free for up to 50 users.
 
 ```bash
-vtunnel cloudflare auth --access     # one-time: grant vtunnel an Access-write token
+vtunnel access setup                 # guided one-time Zero Trust enablement
+vtunnel cloudflare auth --access     # grant vtunnel an Access-write token
 vtunnel access status                # Zero Trust state, identity providers, protected routes
 
 vtunnel http 8080 admin --protect --allow you@example.com        # email one-time PIN
-vtunnel http 8080 admin --protect=sso --idp "Authentik" --allow @example.com  # SSO
+vtunnel http 8080 admin --protect=sso --idp "Authentik"          # SSO (allow optional)
 vtunnel access protect admin --allow @example.com                # protect an existing route
+vtunnel access pause admin           # temporarily public (keeps config) · resume to re-enable
 vtunnel access unprotect admin                                   # back to public
+
+vtunnel access idp list                                          # identity providers
+vtunnel access idp add authentik --issuer https://auth.example.com/application/o/cf/ \
+  --client-id … --client-secret …                                # OIDC (endpoints auto-discovered)
+vtunnel access idp add google --apps-domain example.com --client-id … --client-secret …
 ```
 
-- **`--protect` / `--protect=otp`** — email one-time PIN (no identity provider needed). `--allow` is required (an email or `@domain`).
-- **`--protect=email`** — locks the route to a single email via one-time PIN (the honest "simple password").
-- **`--protect=sso`** — use an identity provider (`--idp <name>`); Authentik (OIDC) and Google Workspace are supported.
+You can also manage all of this **from the HTTP dashboard**: press `a` on a route to open the Access panel (choose Public / SSO / OTP, pick the identity provider, set who's allowed, pause/resume), and the "new tunnel" form has a Protect step so you can secure a route as you create it.
+
+- **`--protect` / `--protect=otp`** — email one-time PIN (no identity provider needed). `--allow` is required (an email or `@domain`). For a single-person route, just allow one email.
+- **`--protect=sso`** — use an identity provider (`--idp <name>`); Authentik (OIDC) and Google Workspace are supported. `--allow` is optional — leave it out to allow anyone who signs in through that provider, or narrow with `@domain`.
 
 Protection is created **before** the route is published (the hostname is never briefly public), and rolled back if publishing fails. Protected routes show a 🔒 badge in the dashboard. If you must enable Zero Trust first, `vtunnel access status` walks you through the one-time dashboard step.
 

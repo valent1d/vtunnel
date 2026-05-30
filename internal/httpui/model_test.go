@@ -138,9 +138,9 @@ func TestModelCreateRoute(t *testing.T) {
 	cfg := config.Default()
 	cfg.DefaultDomain = "example.test"
 	client := &fakeClient{}
-	model := NewModel(client, cfg, "")
+	model := NewModel(client, cfg, "", nil)
 	model.mode = modeCreate
-	model.createStep = 2
+	model.createStep = 3 // last step (protect selector) → enter creates
 	model.portInput.SetValue("3000")
 	model.subInput.SetValue("web")
 	model.domainInput.SetValue("example.test")
@@ -178,7 +178,7 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 			Path:     fmt.Sprintf("/%d", index),
 		})
 	}
-	model := NewModel(client, cfg, "web.example.test")
+	model := NewModel(client, cfg, "web.example.test", nil)
 	model.routes = client.routes
 	model.syncSelection()
 	model.logs = client.logs
@@ -216,7 +216,7 @@ func TestModelFetchesExchangeDetailAndReplays(t *testing.T) {
 			},
 		},
 	}
-	model := NewModel(client, cfg, "web.example.test")
+	model := NewModel(client, cfg, "web.example.test", nil)
 	model.routes = client.routes
 	model.syncSelection()
 	model.logs = client.logs
@@ -268,7 +268,7 @@ func TestLogScrollMovesPastVisibleWindow(t *testing.T) {
 			ID: uint64(i + 1), Hostname: "web.example.test", Method: "GET", Status: 200, Path: fmt.Sprintf("/p%d", i),
 		})
 	}
-	model := NewModel(client, cfg, "web.example.test")
+	model := NewModel(client, cfg, "web.example.test", nil)
 	model.routes = client.routes
 	model.syncSelection()
 	model.logs = client.logs
@@ -296,8 +296,134 @@ func press(value string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "down":
 		return tea.KeyPressMsg{Code: tea.KeyDown}
+	case "up":
+		return tea.KeyPressMsg{Code: tea.KeyUp}
+	case "left":
+		return tea.KeyPressMsg{Code: tea.KeyLeft}
+	case "right":
+		return tea.KeyPressMsg{Code: tea.KeyRight}
+	case "esc":
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	default:
 		return tea.KeyPressMsg{Code: []rune(value)[0], Text: value}
+	}
+}
+
+type fakeAccess struct {
+	idps        []string
+	protected   map[string]string
+	lastAllow   string
+	lastIdP     string
+	unprotected []string
+	paused      []string
+	resumed     []string
+}
+
+func (f *fakeAccess) IdentityProviders(context.Context) []string { return f.idps }
+
+func (f *fakeAccess) Protect(_ context.Context, hostname, mode, allow, idp string) error {
+	if f.protected == nil {
+		f.protected = map[string]string{}
+	}
+	f.protected[hostname] = mode
+	f.lastAllow = allow
+	f.lastIdP = idp
+	return nil
+}
+func (f *fakeAccess) Unprotect(_ context.Context, hostname string) error {
+	f.unprotected = append(f.unprotected, hostname)
+	return nil
+}
+func (f *fakeAccess) Pause(_ context.Context, hostname string) error {
+	f.paused = append(f.paused, hostname)
+	return nil
+}
+func (f *fakeAccess) Resume(_ context.Context, hostname string) error {
+	f.resumed = append(f.resumed, hostname)
+	return nil
+}
+
+func TestAccessPanelProtectsSelectedRoute(t *testing.T) {
+	cfg := config.Default()
+	client := &fakeClient{routes: []routes.Route{{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}}}
+	access := &fakeAccess{}
+	model := NewModel(client, cfg, "web.example.test", access)
+	model.routes = client.routes
+	model.syncSelection()
+	model.focus = focusTunnels
+
+	// Open the Access panel.
+	updated, _ := model.Update(press("a"))
+	model = updated.(Model)
+	if model.mode != modeAccess {
+		t.Fatalf("mode = %v, want access panel", model.mode)
+	}
+	// No IdPs configured → modes are [public, otp]. Cycle Public → OTP.
+	updated, _ = model.Update(press("right"))
+	model = updated.(Model)
+	if model.modeKey() != "otp" {
+		t.Fatalf("modeKey = %q, want otp", model.modeKey())
+	}
+	updated, _ = model.Update(press("down")) // focus Allow
+	model = updated.(Model)
+	model.allowInput.SetValue("@progiseize.com")
+
+	// Apply.
+	updated, cmd := model.Update(press("enter"))
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected an apply command")
+	}
+	updated, _ = model.Update(cmd()) // accessResultMsg
+	model = updated.(Model)
+
+	if access.protected["web.example.test"] != "otp" {
+		t.Fatalf("protected = %v", access.protected)
+	}
+	if access.lastAllow != "@progiseize.com" {
+		t.Fatalf("allow = %q", access.lastAllow)
+	}
+	if model.mode != modeDashboard {
+		t.Fatalf("panel should close after apply, mode = %v", model.mode)
+	}
+}
+
+func TestAccessPanelProtectsViaSSOWithoutEmail(t *testing.T) {
+	cfg := config.Default()
+	client := &fakeClient{routes: []routes.Route{{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}}}
+	access := &fakeAccess{idps: []string{"VLTN Connect"}}
+	model := NewModel(client, cfg, "web.example.test", access)
+	model.routes = client.routes
+	model.syncSelection()
+	model.focus = focusTunnels
+	model.accessIdPs = []string{"VLTN Connect"} // simulate the fetched IdP list
+
+	updated, _ := model.Update(press("a"))
+	model = updated.(Model)
+	// Modes are [public, sso, otp]; one step right selects SSO.
+	updated, _ = model.Update(press("right"))
+	model = updated.(Model)
+	if model.modeKey() != "sso" {
+		t.Fatalf("modeKey = %q, want sso", model.modeKey())
+	}
+
+	// Apply with no allow — SSO must not require an email.
+	updated, cmd := model.Update(press("enter"))
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected an apply command")
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(Model)
+
+	if access.protected["web.example.test"] != "sso" {
+		t.Fatalf("protected = %v", access.protected)
+	}
+	if access.lastIdP != "VLTN Connect" {
+		t.Fatalf("idp = %q, want VLTN Connect", access.lastIdP)
+	}
+	if access.lastAllow != "" {
+		t.Fatalf("SSO should not require an allow, got %q", access.lastAllow)
 	}
 }
 

@@ -255,7 +255,7 @@ func newAccessUnprotectCommand(configPath *string) *cobra.Command {
 }
 
 func addProtectFlags(cmd *cobra.Command, mode *string, allow *[]string, idp, session *string, force *bool) {
-	cmd.Flags().StringVar(mode, "mode", "otp", "auth method: otp | email | sso")
+	cmd.Flags().StringVar(mode, "mode", "otp", "auth method: otp | sso")
 	cmd.Flags().StringArrayVar(allow, "allow", nil, "who may sign in: an email, @domain, or everyone (repeatable)")
 	cmd.Flags().StringVar(idp, "idp", "", "identity provider name for --mode=sso")
 	cmd.Flags().StringVar(session, "session", "24h", "Access session duration")
@@ -511,22 +511,19 @@ func normalizeProtectMode(mode string) (string, error) {
 	switch strings.TrimSpace(strings.ToLower(mode)) {
 	case "", "otp":
 		return "otp", nil
-	case "email":
-		return "email", nil
 	case "sso":
 		return "sso", nil
 	default:
-		return "", fmt.Errorf("invalid --mode %q: use otp, email or sso", mode)
+		return "", fmt.Errorf("invalid --mode %q: use otp or sso", mode)
 	}
 }
 
-// buildAllowRules turns --allow values into Access policy include rules.
+// buildAllowRules turns --allow values into Access policy include rules. For
+// SSO the allow-list is optional: empty means anyone who authenticates through
+// the chosen identity provider (the app is already pinned to that IdP).
 func buildAllowRules(mode string, allow []string, force bool) ([]map[string]any, error) {
-	if mode == "email" {
-		if len(allow) != 1 || strings.HasPrefix(allow[0], "@") || !strings.Contains(allow[0], "@") {
-			return nil, errors.New("--mode=email needs exactly one --allow <email>")
-		}
-		return []map[string]any{cfapi.EmailRule(strings.TrimSpace(allow[0]))}, nil
+	if mode == "sso" && len(allow) == 0 {
+		return []map[string]any{cfapi.EveryoneRule()}, nil
 	}
 	if len(allow) == 0 {
 		return nil, fmt.Errorf("--mode=%s needs at least one --allow <email|@domain>", mode)

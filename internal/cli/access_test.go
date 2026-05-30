@@ -98,17 +98,6 @@ func TestAccessStatusNotSetUp(t *testing.T) {
 }
 
 func TestBuildAllowRules(t *testing.T) {
-	// email mode: exactly one email
-	if _, err := buildAllowRules("email", []string{"a@b.com"}, false); err != nil {
-		t.Fatalf("valid email: %v", err)
-	}
-	if _, err := buildAllowRules("email", []string{"a@b.com", "c@d.com"}, false); err == nil {
-		t.Fatal("email mode should reject two values")
-	}
-	if _, err := buildAllowRules("email", []string{"@b.com"}, false); err == nil {
-		t.Fatal("email mode should reject a domain")
-	}
-
 	// otp/sso: emails and @domains
 	rules, err := buildAllowRules("otp", []string{"a@b.com", "@progiseize.com"}, false)
 	if err != nil || len(rules) != 2 {
@@ -121,9 +110,20 @@ func TestBuildAllowRules(t *testing.T) {
 		t.Fatalf("second rule not email_domain: %v", rules[1])
 	}
 
-	// empty allow rejected
+	// otp requires an allow
 	if _, err := buildAllowRules("otp", nil, false); err == nil {
 		t.Fatal("otp with no allow should error")
+	}
+	// sso allow is optional → empty means everyone via the IdP
+	ssoRules, err := buildAllowRules("sso", nil, false)
+	if err != nil {
+		t.Fatalf("sso with no allow should be allowed: %v", err)
+	}
+	if len(ssoRules) != 1 {
+		t.Fatalf("sso empty allow should produce one rule, got %v", ssoRules)
+	}
+	if _, ok := ssoRules[0]["everyone"]; !ok {
+		t.Fatalf("sso empty allow rule should be everyone: %v", ssoRules[0])
 	}
 	// everyone gated behind --force
 	if _, err := buildAllowRules("otp", []string{"everyone"}, false); err == nil {
