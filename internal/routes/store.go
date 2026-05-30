@@ -22,6 +22,19 @@ type Route struct {
 	// routing; nil for ordinary routes. omitempty keeps existing routes.json
 	// files unchanged.
 	Orbstack *OrbstackInfo `json:"orbstack,omitempty"`
+	// Access is set when the route is protected by a Cloudflare Access app.
+	// nil means the route is public. It records the IDs needed for clean
+	// teardown plus display metadata.
+	Access *AccessInfo `json:"access,omitempty"`
+}
+
+// AccessInfo records the Cloudflare Access protection on a route.
+type AccessInfo struct {
+	AppID     string   `json:"app_id,omitempty"`
+	PolicyIDs []string `json:"policy_ids,omitempty"`
+	Mode      string   `json:"mode"`            // otp | email | sso
+	IdP       string   `json:"idp,omitempty"`   // identity provider name (sso)
+	Allow     []string `json:"allow,omitempty"` // emails / @domains / everyone
 }
 
 // OrbstackInfo describes the OrbStack container behind a route.

@@ -81,6 +81,32 @@ func TestPlainRouteHasNilOrbstack(t *testing.T) {
 	}
 }
 
+func TestStorePersistsAccessMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store, _ := NewStore(path)
+	if err := store.Add(Route{
+		Hostname: "doli23.example.test",
+		Target:   "http://127.0.0.1:8080",
+		Access: &AccessInfo{
+			AppID:     "app-1",
+			PolicyIDs: []string{"pol-1"},
+			Mode:      "sso",
+			IdP:       "Authentik",
+			Allow:     []string{"@progiseize.com"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, _ := NewStore(path)
+	route, ok := reloaded.Get("doli23.example.test")
+	if !ok || route.Access == nil {
+		t.Fatalf("access metadata not persisted: %+v", route)
+	}
+	if route.Access.AppID != "app-1" || route.Access.Mode != "sso" || route.Access.IdP != "Authentik" {
+		t.Fatalf("access = %+v", route.Access)
+	}
+}
+
 func TestValidateRejectsNonHTTPRoutes(t *testing.T) {
 	err := Validate(Route{Hostname: "dev.example.test", Target: "file:///tmp/app"})
 	if err == nil {

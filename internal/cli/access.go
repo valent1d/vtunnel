@@ -4,11 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"vtunnel/internal/api"
 	cfapi "vtunnel/internal/cloudflare"
+	"vtunnel/internal/config"
+	"vtunnel/internal/routes"
 )
+
+// errAccessWriteScope is returned when the token can read but not write Access.
+var errAccessWriteScope = errors.New("your Cloudflare token cannot create Access apps — run: vtunnel cloudflare auth --access")
 
 func newAccessCommand(configPath *string) *cobra.Command {
 	cmd := &cobra.Command{
@@ -17,14 +25,18 @@ func newAccessCommand(configPath *string) *cobra.Command {
 		Long: "Put a Cloudflare Access login page in front of exposed routes. Access is\n" +
 			"free for up to 50 users (counted across your whole Cloudflare account).",
 	}
-	cmd.AddCommand(newAccessStatusCommand(configPath))
+	cmd.AddCommand(
+		newAccessStatusCommand(configPath),
+		newAccessProtectCommand(configPath),
+		newAccessUnprotectCommand(configPath),
+	)
 	return cmd
 }
 
-func newAccessStatusCommand(_ *string) *cobra.Command {
+func newAccessStatusCommand(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show Cloudflare Access / Zero Trust readiness",
+		Short: "Show Cloudflare Access / Zero Trust readiness and protected routes",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
 			client, _, err := newCloudflareClientFromKeychain()
@@ -55,37 +67,374 @@ func newAccessStatusCommand(_ *string) *cobra.Command {
 						fmt.Fprintf(out, "  - %-12s %s\n", idp.Type, name)
 					}
 				}
-				fmt.Fprintln(out, "Token: Access read OK")
-				fmt.Fprintln(out, "To let vtunnel create protections, run: vtunnel cloudflare auth --access")
 			case cfapi.AccessNotSetUp:
 				fmt.Fprintln(out, "Zero Trust: NOT ENABLED")
 				fmt.Fprintln(out, "Enable it once in the dashboard (free up to 50 users):")
 				fmt.Fprintln(out, "  https://one.dash.cloudflare.com  → pick a team name → Free plan")
 				fmt.Fprintln(out, "  (Cloudflare asks for a card even on Free; you are not charged.)")
-				if status.Detail != "" {
-					fmt.Fprintf(out, "  detail: %s\n", status.Detail)
-				}
+				return nil
 			case cfapi.AccessTokenUnscoped:
 				fmt.Fprintln(out, "Zero Trust: your API token cannot read Access.")
 				fmt.Fprintln(out, "Re-create the token with Access scope: vtunnel cloudflare auth --access")
+				return nil
 			default:
 				fmt.Fprintf(out, "Access state unknown: %s\n", status.Detail)
+				return nil
 			}
+
+			printProtectedRoutes(cmd.Context(), out, *configPath)
 			return nil
 		},
 	}
 }
 
-// resolveAccountID returns the Cloudflare account to operate on. With a single
-// account it is unambiguous; multiple accounts are noted (confirm-with-default
-// is a later refinement).
-func resolveAccountID(ctx context.Context, client *cfapi.Client) (string, error) {
-	accounts, err := client.ListAccounts(ctx)
+func newAccessProtectCommand(configPath *string) *cobra.Command {
+	var mode, idp, session string
+	var allow []string
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "protect <subdomain>",
+		Short: "Protect an existing route with Cloudflare Access",
+		Long: "Create an Access app + policy for an already-published route. The route\n" +
+			"stays reachable until the policy propagates to the edge (a few seconds).",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+			hostname, err := hostnameForStop(args[0], cfg)
+			if err != nil {
+				return err
+			}
+
+			route, ok := findRoute(cmd.Context(), cfg, hostname)
+			if !ok {
+				return fmt.Errorf("no route %s; create it protected with: vtunnel http <port> %s --protect", hostname, args[0])
+			}
+
+			fmt.Fprintf(out, "⚠ %s is currently PUBLIC and stays reachable for a few seconds while the policy propagates.\n", hostname)
+
+			info, err := runProtection(cmd, hostname, protectOptions{Mode: mode, Allow: allow, IdP: idp, Session: session, Force: force})
+			if err != nil {
+				return err
+			}
+			route.Access = info
+			if err := api.New(cfg).AddRoute(cmd.Context(), route); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "🔒 %s protected (%s)\n", hostname, info.Mode)
+			return nil
+		},
+	}
+	addProtectFlags(cmd, &mode, &allow, &idp, &session, &force)
+	return cmd
+}
+
+func newAccessUnprotectCommand(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "unprotect <subdomain>",
+		Short: "Remove Cloudflare Access protection from a route",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+			hostname, err := hostnameForStop(args[0], cfg)
+			if err != nil {
+				return err
+			}
+			route, ok := findRoute(cmd.Context(), cfg, hostname)
+			if !ok || route.Access == nil {
+				fmt.Fprintf(out, "%s is not protected.\n", hostname)
+				return nil
+			}
+
+			client, _, err := newCloudflareClientFromKeychain()
+			if err != nil {
+				return err
+			}
+			accountID, err := resolveAccountID(cmd.Context(), client)
+			if err != nil {
+				return err
+			}
+			if err := unprotectHostname(cmd.Context(), client, accountID, route.Access); err != nil {
+				return err
+			}
+			route.Access = nil
+			if err := api.New(cfg).AddRoute(cmd.Context(), route); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "🔓 %s is now PUBLIC — anyone with the link can reach it.\n", hostname)
+			return nil
+		},
+	}
+}
+
+func addProtectFlags(cmd *cobra.Command, mode *string, allow *[]string, idp, session *string, force *bool) {
+	cmd.Flags().StringVar(mode, "mode", "otp", "auth method: otp | email | sso")
+	cmd.Flags().StringArrayVar(allow, "allow", nil, "who may sign in: an email, @domain, or everyone (repeatable)")
+	cmd.Flags().StringVar(idp, "idp", "", "identity provider name for --mode=sso")
+	cmd.Flags().StringVar(session, "session", "24h", "Access session duration")
+	cmd.Flags().BoolVar(force, "force", false, "allow risky choices such as --allow everyone")
+}
+
+// runProtection wires the shared protect flow: resolve+confirm account, ensure
+// Access is ready, then create the app + policy.
+func runProtection(cmd *cobra.Command, hostname string, opts protectOptions) (*routes.AccessInfo, error) {
+	out := cmd.OutOrStdout()
+	client, _, err := newCloudflareClientFromKeychain()
+	if errors.Is(err, cfapi.ErrMissingToken) {
+		return nil, errAccessWriteScope
+	}
+	if err != nil {
+		return nil, err
+	}
+	accountID, accountName, count, err := resolveAccount(cmd.Context(), client)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(out, "Using Cloudflare account: %s\n", accountName)
+	if count > 1 {
+		fmt.Fprintln(out, "  (multiple accounts visible; using the first — multi-account selection is not implemented yet)")
+	}
+
+	if status := cfapi.DetectAccess(cmd.Context(), client, accountID); status.State != cfapi.AccessReady {
+		if status.State == cfapi.AccessTokenUnscoped {
+			return nil, errAccessWriteScope
+		}
+		return nil, errors.New("Zero Trust is not enabled — run `vtunnel access status` for setup steps")
+	}
+
+	return protectHostname(cmd.Context(), client, accountID, hostname, opts)
+}
+
+type protectOptions struct {
+	Mode    string
+	Allow   []string
+	IdP     string
+	Session string
+	Force   bool
+}
+
+func accessAppName(hostname string) string { return "vtunnel-" + hostname }
+
+// protectHostname creates (idempotently replacing any prior vtunnel app) the
+// Access app + allow policy for a hostname and returns the route metadata. On
+// any failure after the app is created it rolls the app back, so a half-built
+// protection never lingers.
+func protectHostname(ctx context.Context, client *cfapi.Client, accountID, hostname string, opts protectOptions) (*routes.AccessInfo, error) {
+	mode, err := normalizeProtectMode(opts.Mode)
+	if err != nil {
+		return nil, err
+	}
+	rules, err := buildAllowRules(mode, opts.Allow, opts.Force)
+	if err != nil {
+		return nil, err
+	}
+	idpID, err := resolveProtectIdP(ctx, client, accountID, mode, opts.IdP)
+	if err != nil {
+		if cfapi.IsAuthorizationError(err) {
+			return nil, errAccessWriteScope
+		}
+		return nil, err
+	}
+
+	name := accessAppName(hostname)
+	// Idempotent replace: drop any prior app vtunnel created for this hostname.
+	if apps, listErr := client.ListAccessApps(ctx, accountID); listErr == nil {
+		for _, app := range apps {
+			if app.Name == name {
+				_ = client.DeleteAccessApp(ctx, accountID, app.ID)
+			}
+		}
+	}
+
+	session := strings.TrimSpace(opts.Session)
+	if session == "" {
+		session = "24h"
+	}
+	app, err := client.CreateAccessApp(ctx, accountID, cfapi.AccessApp{
+		Name:                   name,
+		Type:                   "self_hosted",
+		Destinations:           []cfapi.AccessDestination{{Type: "public", URI: hostname}},
+		AllowedIDPs:            []string{idpID},
+		AutoRedirectToIdentity: true,
+		SessionDuration:        session,
+		AppLauncherVisible:     false,
+	})
+	if err != nil {
+		if cfapi.IsAuthorizationError(err) {
+			return nil, errAccessWriteScope
+		}
+		return nil, err
+	}
+
+	policy, err := client.CreateAccessPolicy(ctx, accountID, app.ID, cfapi.AccessPolicy{
+		Name:     name,
+		Decision: "allow",
+		Include:  rules,
+	})
+	if err != nil {
+		_ = client.DeleteAccessApp(ctx, accountID, app.ID) // rollback
+		return nil, err
+	}
+
+	info := &routes.AccessInfo{
+		AppID:     app.ID,
+		PolicyIDs: []string{policy.ID},
+		Mode:      mode,
+		Allow:     opts.Allow,
+	}
+	if mode == "sso" {
+		info.IdP = opts.IdP
+	}
+	return info, nil
+}
+
+func unprotectHostname(ctx context.Context, client *cfapi.Client, accountID string, info *routes.AccessInfo) error {
+	if info == nil || strings.TrimSpace(info.AppID) == "" {
+		return nil
+	}
+	return client.DeleteAccessApp(ctx, accountID, info.AppID)
+}
+
+func normalizeProtectMode(mode string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "", "otp":
+		return "otp", nil
+	case "email":
+		return "email", nil
+	case "sso":
+		return "sso", nil
+	default:
+		return "", fmt.Errorf("invalid --mode %q: use otp, email or sso", mode)
+	}
+}
+
+// buildAllowRules turns --allow values into Access policy include rules.
+func buildAllowRules(mode string, allow []string, force bool) ([]map[string]any, error) {
+	if mode == "email" {
+		if len(allow) != 1 || strings.HasPrefix(allow[0], "@") || !strings.Contains(allow[0], "@") {
+			return nil, errors.New("--mode=email needs exactly one --allow <email>")
+		}
+		return []map[string]any{cfapi.EmailRule(strings.TrimSpace(allow[0]))}, nil
+	}
+	if len(allow) == 0 {
+		return nil, fmt.Errorf("--mode=%s needs at least one --allow <email|@domain>", mode)
+	}
+	rules := make([]map[string]any, 0, len(allow))
+	for _, value := range allow {
+		value = strings.TrimSpace(value)
+		switch {
+		case value == "everyone":
+			if !force {
+				return nil, errors.New("--allow everyone protects nobody meaningfully; pass --force to confirm")
+			}
+			rules = append(rules, cfapi.EveryoneRule())
+		case strings.HasPrefix(value, "@"):
+			rules = append(rules, cfapi.EmailDomainRule(strings.TrimPrefix(value, "@")))
+		case strings.Contains(value, "@"):
+			rules = append(rules, cfapi.EmailRule(value))
+		default:
+			return nil, fmt.Errorf("invalid --allow %q: use an email, @domain, or everyone", value)
+		}
+	}
+	return rules, nil
+}
+
+// resolveProtectIdP returns the identity-provider ID for the mode. otp/email
+// reuse (or create) the built-in One-time PIN; sso resolves a named provider.
+func resolveProtectIdP(ctx context.Context, client *cfapi.Client, accountID, mode, idpName string) (string, error) {
+	idps, err := client.ListIdentityProviders(ctx, accountID)
 	if err != nil {
 		return "", err
 	}
-	if len(accounts) == 0 {
-		return "", errors.New("no Cloudflare account is accessible with this token")
+	if mode == "sso" {
+		if strings.TrimSpace(idpName) == "" {
+			return "", errors.New("--mode=sso needs --idp <name> (see: vtunnel access status)")
+		}
+		for _, idp := range idps {
+			if strings.EqualFold(idp.Name, idpName) || strings.EqualFold(idp.Type, idpName) {
+				return idp.ID, nil
+			}
+		}
+		return "", fmt.Errorf("identity provider %q not found (see: vtunnel access status)", idpName)
 	}
-	return accounts[0].ID, nil
+	for _, idp := range idps {
+		if idp.Type == "onetimepin" {
+			return idp.ID, nil
+		}
+	}
+	created, err := client.CreateIdentityProvider(ctx, accountID, cfapi.IdentityProvider{Name: "One-time PIN", Type: "onetimepin"})
+	if err != nil {
+		return "", err
+	}
+	return created.ID, nil
+}
+
+// resolveAccount returns the account to operate on plus how many were visible.
+func resolveAccount(ctx context.Context, client *cfapi.Client) (id, name string, count int, err error) {
+	accounts, err := client.ListAccounts(ctx)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if len(accounts) == 0 {
+		return "", "", 0, errors.New("no Cloudflare account is accessible with this token")
+	}
+	return accounts[0].ID, accounts[0].Name, len(accounts), nil
+}
+
+// resolveAccountID is the simple form used by read-only commands.
+func resolveAccountID(ctx context.Context, client *cfapi.Client) (string, error) {
+	id, _, _, err := resolveAccount(ctx, client)
+	return id, err
+}
+
+// findRoute looks up a route by hostname via the daemon, falling back to the
+// saved routes file when the daemon is not running.
+func findRoute(ctx context.Context, cfg config.Config, hostname string) (routes.Route, bool) {
+	list, err := api.New(cfg).ListRoutes(ctx)
+	if err != nil {
+		list, _ = readSavedRoutes()
+	}
+	for _, route := range list {
+		if route.Hostname == hostname {
+			return route, true
+		}
+	}
+	return routes.Route{}, false
+}
+
+func printProtectedRoutes(ctx context.Context, out io.Writer, configPath string) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return
+	}
+	list, err := api.New(cfg).ListRoutes(ctx)
+	if err != nil {
+		list, _ = readSavedRoutes()
+	}
+	if len(list) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "Routes:")
+	for _, route := range list {
+		if route.Access == nil {
+			fmt.Fprintf(out, "  🔓 %-28s (public)\n", route.Hostname)
+			continue
+		}
+		detail := route.Access.Mode
+		if len(route.Access.Allow) > 0 {
+			detail += "  " + strings.Join(route.Access.Allow, ",")
+		}
+		if route.Access.IdP != "" {
+			detail += "  via " + route.Access.IdP
+		}
+		fmt.Fprintf(out, "  🔒 %-28s %s\n", route.Hostname, detail)
+	}
 }

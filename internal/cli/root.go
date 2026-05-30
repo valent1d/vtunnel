@@ -498,6 +498,11 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 	var domain string
 	var detach bool
 	var target string
+	var protect string
+	var allow []string
+	var protectIdP string
+	var session string
+	var force bool
 
 	cmd := &cobra.Command{
 		Use:   "http [port|target] [subdomain]",
@@ -560,11 +565,35 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 				Hostname: hostname,
 				Target:   routeTarget,
 			}
+
+			// Protect BEFORE publishing the route, so the hostname is never
+			// briefly public. If protection succeeds but publishing fails, roll
+			// the Access app back.
+			protectRequested := cmd.Flags().Changed("protect")
+			if protectRequested {
+				info, err := runProtection(cmd, hostname, protectOptions{Mode: protect, Allow: allow, IdP: protectIdP, Session: session, Force: force})
+				if err != nil {
+					return err
+				}
+				route.Access = info
+			}
+
 			if err := client.AddRoute(cmd.Context(), route); err != nil {
+				if route.Access != nil {
+					if client, _, cerr := newCloudflareClientFromKeychain(); cerr == nil {
+						if accountID, aerr := resolveAccountID(cmd.Context(), client); aerr == nil {
+							_ = unprotectHostname(cmd.Context(), client, accountID, route.Access)
+						}
+					}
+				}
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Forwarding https://%s -> %s\n", hostname, route.Target)
+			if route.Access != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Forwarding https://%s -> %s  🔒 %s\n", hostname, route.Target, route.Access.Mode)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Forwarding https://%s -> %s\n", hostname, route.Target)
+			}
 			if detach {
 				return nil
 			}
@@ -574,6 +603,12 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&domain, "domain", "", "domain to use for this route")
 	cmd.Flags().BoolVar(&detach, "detach", false, "create the route and return instead of following request logs")
 	cmd.Flags().StringVar(&target, "target", "", "upstream URL or host:port to forward to (instead of a local port)")
+	cmd.Flags().StringVar(&protect, "protect", "otp", "protect with Cloudflare Access: otp | email | sso")
+	cmd.Flags().Lookup("protect").NoOptDefVal = "otp"
+	cmd.Flags().StringArrayVar(&allow, "allow", nil, "who may sign in: an email, @domain, or everyone (repeatable)")
+	cmd.Flags().StringVar(&protectIdP, "idp", "", "identity provider name for --protect=sso")
+	cmd.Flags().StringVar(&session, "session", "24h", "Access session duration")
+	cmd.Flags().BoolVar(&force, "force", false, "allow risky choices such as --allow everyone")
 	return cmd
 }
 

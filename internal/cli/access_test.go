@@ -94,6 +94,114 @@ func TestAccessStatusNotSetUp(t *testing.T) {
 	}
 }
 
+func TestBuildAllowRules(t *testing.T) {
+	// email mode: exactly one email
+	if _, err := buildAllowRules("email", []string{"a@b.com"}, false); err != nil {
+		t.Fatalf("valid email: %v", err)
+	}
+	if _, err := buildAllowRules("email", []string{"a@b.com", "c@d.com"}, false); err == nil {
+		t.Fatal("email mode should reject two values")
+	}
+	if _, err := buildAllowRules("email", []string{"@b.com"}, false); err == nil {
+		t.Fatal("email mode should reject a domain")
+	}
+
+	// otp/sso: emails and @domains
+	rules, err := buildAllowRules("otp", []string{"a@b.com", "@progiseize.com"}, false)
+	if err != nil || len(rules) != 2 {
+		t.Fatalf("rules = %v err = %v", rules, err)
+	}
+	if _, ok := rules[0]["email"]; !ok {
+		t.Fatalf("first rule not email: %v", rules[0])
+	}
+	if _, ok := rules[1]["email_domain"]; !ok {
+		t.Fatalf("second rule not email_domain: %v", rules[1])
+	}
+
+	// empty allow rejected
+	if _, err := buildAllowRules("otp", nil, false); err == nil {
+		t.Fatal("otp with no allow should error")
+	}
+	// everyone gated behind --force
+	if _, err := buildAllowRules("otp", []string{"everyone"}, false); err == nil {
+		t.Fatal("everyone without --force should error")
+	}
+	if _, err := buildAllowRules("otp", []string{"everyone"}, true); err != nil {
+		t.Fatalf("everyone with --force should pass: %v", err)
+	}
+}
+
+// protectTestServer stubs the Access API surface needed by protectHostname.
+func protectTestServer(t *testing.T, createdApps, createdPolicies, deletedApps *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/accounts/acct-1/access/identity_providers" && r.Method == http.MethodGet:
+			writeCloudflareEnvelope(t, w, []map[string]any{{"id": "otp-id", "type": "onetimepin", "name": ""}})
+		case r.URL.Path == "/accounts/acct-1/access/apps" && r.Method == http.MethodGet:
+			writeCloudflareEnvelope(t, w, []map[string]any{})
+		case r.URL.Path == "/accounts/acct-1/access/apps" && r.Method == http.MethodPost:
+			var app cfapi.AccessApp
+			_ = json.NewDecoder(r.Body).Decode(&app)
+			*createdApps = append(*createdApps, app.Name)
+			writeCloudflareEnvelope(t, w, map[string]any{"id": "app-1", "name": app.Name, "type": app.Type})
+		case r.URL.Path == "/accounts/acct-1/access/apps/app-1/policies" && r.Method == http.MethodPost:
+			var pol cfapi.AccessPolicy
+			_ = json.NewDecoder(r.Body).Decode(&pol)
+			*createdPolicies = append(*createdPolicies, pol.Decision)
+			writeCloudflareEnvelope(t, w, map[string]any{"id": "pol-1", "decision": pol.Decision})
+		case strings.HasPrefix(r.URL.Path, "/accounts/acct-1/access/apps/") && r.Method == http.MethodDelete:
+			*deletedApps = append(*deletedApps, r.URL.Path)
+			writeCloudflareEnvelope(t, w, map[string]any{"id": "app-1"})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+}
+
+func TestProtectHostnameCreatesAppAndPolicy(t *testing.T) {
+	var apps, policies, deleted []string
+	server := protectTestServer(t, &apps, &policies, &deleted)
+	defer server.Close()
+	client, _ := cfapi.New("tok", cfapi.WithBaseURL(server.URL))
+
+	info, err := protectHostname(context.Background(), client, "acct-1", "doli23.example.com", protectOptions{
+		Mode:  "otp",
+		Allow: []string{"@progiseize.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.AppID != "app-1" || len(info.PolicyIDs) != 1 || info.Mode != "otp" {
+		t.Fatalf("info = %+v", info)
+	}
+	if len(apps) != 1 || apps[0] != "vtunnel-doli23.example.com" {
+		t.Fatalf("created apps = %v", apps)
+	}
+	if len(policies) != 1 || policies[0] != "allow" {
+		t.Fatalf("created policies = %v", policies)
+	}
+}
+
+func TestProtectHostnameSSORequiresKnownIdP(t *testing.T) {
+	var apps, policies, deleted []string
+	server := protectTestServer(t, &apps, &policies, &deleted)
+	defer server.Close()
+	client, _ := cfapi.New("tok", cfapi.WithBaseURL(server.URL))
+
+	_, err := protectHostname(context.Background(), client, "acct-1", "x.example.com", protectOptions{
+		Mode:  "sso",
+		IdP:   "Authentik",
+		Allow: []string{"@progiseize.com"},
+	})
+	if err == nil {
+		t.Fatal("expected error: SSO idp not present in stub")
+	}
+	if len(apps) != 0 {
+		t.Fatalf("no app should be created when idp is missing: %v", apps)
+	}
+}
+
 func TestAccessStatusNoToken(t *testing.T) {
 	stubCloudflareKeychainToken(t, "", cfapi.ErrMissingToken)
 	out, err := executeCommand(context.Background(), "access", "status")
