@@ -17,10 +17,11 @@ func (r *recorder) actions() Actions {
 	return Actions{
 		StopDaemon:     func(context.Context) error { r.calls = append(r.calls, "stop-daemon"); return nil },
 		RemoveServices: func(context.Context) error { r.calls = append(r.calls, "remove-services"); return nil },
-		DeleteDNS:      func(_ context.Context, rec DNSRecord) error { r.calls = append(r.calls, "dns:"+rec.Hostname); return nil },
-		DeleteTunnel:   func(_ context.Context, ref string) error { r.calls = append(r.calls, "tunnel:"+ref); return nil },
-		RemovePath:     func(path string) error { r.calls = append(r.calls, "path:"+path); return nil },
-		DeleteToken:    func() error { r.calls = append(r.calls, "token"); return nil },
+		DeleteDNS:       func(_ context.Context, rec DNSRecord) error { r.calls = append(r.calls, "dns:"+rec.Hostname); return nil },
+		DeleteTunnel:    func(_ context.Context, ref string) error { r.calls = append(r.calls, "tunnel:"+ref); return nil },
+		DeleteAccessApp: func(_ context.Context, appID string) error { r.calls = append(r.calls, "access:"+appID); return nil },
+		RemovePath:      func(path string) error { r.calls = append(r.calls, "path:"+path); return nil },
+		DeleteToken:     func() error { r.calls = append(r.calls, "token"); return nil },
 	}
 }
 
@@ -66,6 +67,27 @@ func TestExecuteFullOrderWithCloudflare(t *testing.T) {
 	}
 	if report.Failed() {
 		t.Fatal("report should not have failed")
+	}
+}
+
+func TestExecuteDeletesAccessAppsOnlyWithCloudflare(t *testing.T) {
+	plan := func(include bool) Plan {
+		return Plan{
+			Options:    Options{IncludeCloudflare: include},
+			Cloudflare: Cloudflare{AccessApps: []AccessApp{{Hostname: "doli23.example.com", AppID: "app-1"}}},
+		}
+	}
+
+	rec := &recorder{}
+	Execute(context.Background(), plan(true), rec.actions())
+	if !contains(rec.calls, "access:app-1") {
+		t.Fatalf("expected Access app deletion with --cloudflare, got %v", rec.calls)
+	}
+
+	rec2 := &recorder{}
+	Execute(context.Background(), plan(false), rec2.actions())
+	if contains(rec2.calls, "access:app-1") {
+		t.Fatalf("Access app must not be deleted without --cloudflare, got %v", rec2.calls)
 	}
 }
 

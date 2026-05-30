@@ -353,6 +353,20 @@ func isolateUninstallEnv(t *testing.T) {
 	t.Setenv("HOME", tempDir)
 	t.Setenv("XDG_CONFIG_HOME", tempDir)
 
+	// Pin the daemon API/proxy to freshly-closed ports so daemon detection is
+	// deterministic — never picking up a real vtunnel daemon on the default
+	// :8788 that may be running on the test machine.
+	cfg := config.Default()
+	cfg.Proxy.Listen = freeLoopbackAddr(t)
+	cfg.API.Listen = freeLoopbackAddr(t)
+	cfgPath, err := config.ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
 	previousRead := readCloudflareTokenFromKeychain
 	previousDelete := deleteCloudflareTokenFromKeychain
 	previousRunner := launchdRunner

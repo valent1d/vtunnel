@@ -741,6 +741,10 @@ func newStopCommand(configPath *string) *cobra.Command {
 				return err
 			}
 
+			// Capture any Access protection before the route is gone, so we can
+			// tear down its Access app and avoid leaving an orphan.
+			route, _ := findRoute(cmd.Context(), cfg, hostname)
+
 			client := api.New(cfg)
 			if err := client.DeleteRoute(cmd.Context(), hostname); err != nil {
 				store, storeErr := savedRouteStore()
@@ -757,6 +761,9 @@ func newStopCommand(configPath *string) *cobra.Command {
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "Stopped %s\n", hostname)
+			if route.Access != nil && route.Access.AppID != "" {
+				teardownAccessForStop(cmd, hostname, route.Access.AppID)
+			}
 			return nil
 		},
 	}
@@ -1066,10 +1073,11 @@ func newServiceUninstallCommand(configPath *string) *cobra.Command {
 // uninstallRuntime holds the live handles BuildPlan resolved so the action
 // hooks reuse them instead of re-inspecting.
 type uninstallRuntime struct {
-	cfg      config.Config
-	manager  launchd.Manager
-	specs    []launchd.Spec
-	cfClient *cfapi.Client
+	cfg       config.Config
+	manager   launchd.Manager
+	specs     []launchd.Spec
+	cfClient  *cfapi.Client
+	accountID string
 }
 
 func newUninstallCommand(configPath *string) *cobra.Command {
@@ -1191,9 +1199,57 @@ func buildUninstallPlan(ctx context.Context, configPath string, opts uninstall.O
 
 	if inspectCF {
 		plan.Cloudflare = buildCloudflareUninstallPlan(ctx, cfg, rt)
+		plan.Cloudflare.AccessApps = collectAccessApps(ctx, rt)
 	}
 
 	return plan, rt, nil
+}
+
+// collectAccessApps finds the Cloudflare Access apps vtunnel created: those
+// recorded on saved routes plus any orphaned vtunnel-* apps still on the
+// account (e.g. left when a protected route was stopped without unprotect).
+func collectAccessApps(ctx context.Context, rt *uninstallRuntime) []uninstall.AccessApp {
+	if rt.cfClient == nil {
+		client, _, err := newCloudflareClientFromKeychain()
+		if err != nil {
+			return nil
+		}
+		rt.cfClient = client
+	}
+	if rt.accountID == "" {
+		accountID, err := resolveAccountID(ctx, rt.cfClient)
+		if err != nil {
+			return nil
+		}
+		rt.accountID = accountID
+	}
+
+	seen := map[string]bool{}
+	var apps []uninstall.AccessApp
+	add := func(hostname, appID string) {
+		if appID == "" || seen[appID] {
+			return
+		}
+		seen[appID] = true
+		apps = append(apps, uninstall.AccessApp{Hostname: hostname, AppID: appID})
+	}
+
+	if saved, err := readSavedRoutes(); err == nil {
+		for _, route := range saved {
+			if route.Access != nil {
+				add(route.Hostname, route.Access.AppID)
+			}
+		}
+	}
+	// Orphan scan: vtunnel-named apps no longer tracked by a route.
+	if cfApps, err := rt.cfClient.ListAccessApps(ctx, rt.accountID); err == nil {
+		for _, app := range cfApps {
+			if strings.HasPrefix(app.Name, "vtunnel-") {
+				add(strings.TrimPrefix(app.Name, "vtunnel-"), app.ID)
+			}
+		}
+	}
+	return apps
 }
 
 func buildCloudflareUninstallPlan(ctx context.Context, cfg config.Config, rt *uninstallRuntime) uninstall.Cloudflare {
@@ -1292,6 +1348,12 @@ func uninstallActions(rt *uninstallRuntime) uninstall.Actions {
 		actions.DeleteDNS = func(ctx context.Context, record uninstall.DNSRecord) error {
 			return client.DeleteDNSRecord(ctx, record.ZoneID, record.RecordID)
 		}
+		if rt.accountID != "" {
+			accountID := rt.accountID
+			actions.DeleteAccessApp = func(ctx context.Context, appID string) error {
+				return client.DeleteAccessApp(ctx, accountID, appID)
+			}
+		}
 	}
 	return actions
 }
@@ -1379,8 +1441,11 @@ func printUninstallPlan(out io.Writer, plan uninstall.Plan) {
 				fmt.Fprintf(out, "    note: %s\n", plan.Cloudflare.Reason)
 			}
 		}
+		for _, app := range plan.Cloudflare.AccessApps {
+			fmt.Fprintf(out, "    • Access app %s\n", app.Hostname)
+		}
 	} else {
-		fmt.Fprintln(out, "  Cloudflare account resources: kept (pass --cloudflare to also delete the tunnel and DNS)")
+		fmt.Fprintln(out, "  Cloudflare account resources: kept (pass --cloudflare to also delete the tunnel, DNS and Access apps)")
 	}
 }
 

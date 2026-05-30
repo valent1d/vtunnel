@@ -296,6 +296,28 @@ func protectHostname(ctx context.Context, client *cfapi.Client, accountID, hostn
 	return info, nil
 }
 
+// teardownAccessForStop removes the Access app behind a route being stopped,
+// best-effort: if the token can't write Access, it warns instead of failing the
+// stop, so the route still goes away and the user knows the app remains.
+func teardownAccessForStop(cmd *cobra.Command, hostname, appID string) {
+	out := cmd.OutOrStdout()
+	client, _, err := newCloudflareClientFromKeychain()
+	if err != nil {
+		fmt.Fprintf(out, "⚠ %s was Access-protected; its Access app remains. Remove it with `vtunnel access unprotect` (after `vtunnel cloudflare auth --access`) or in the dashboard.\n", hostname)
+		return
+	}
+	accountID, err := resolveAccountID(cmd.Context(), client)
+	if err != nil {
+		fmt.Fprintf(out, "⚠ %s Access app could not be removed (%v); remove it in the dashboard.\n", hostname, err)
+		return
+	}
+	if err := client.DeleteAccessApp(cmd.Context(), accountID, appID); err != nil {
+		fmt.Fprintf(out, "⚠ %s Access app could not be removed (%v); remove it in the dashboard.\n", hostname, err)
+		return
+	}
+	fmt.Fprintf(out, "Removed Cloudflare Access protection for %s\n", hostname)
+}
+
 func unprotectHostname(ctx context.Context, client *cfapi.Client, accountID string, info *routes.AccessInfo) error {
 	if info == nil || strings.TrimSpace(info.AppID) == "" {
 		return nil

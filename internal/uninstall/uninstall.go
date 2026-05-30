@@ -59,6 +59,16 @@ type Cloudflare struct {
 	TunnelName string
 	Records    []DNSRecord
 	Creds      LocalPath
+	// AccessApps are Cloudflare Access applications vtunnel created to protect
+	// routes. They are independent of the tunnel, so they are removed whenever
+	// Cloudflare cleanup is requested, even if the tunnel could not be resolved.
+	AccessApps []AccessApp
+}
+
+// AccessApp is a Cloudflare Access application to delete.
+type AccessApp struct {
+	Hostname string
+	AppID    string
 }
 
 // Label returns a human-friendly name for the tunnel.
@@ -96,10 +106,11 @@ func (p Plan) InstalledServices() []Service {
 type Actions struct {
 	StopDaemon     func(context.Context) error
 	RemoveServices func(context.Context) error
-	DeleteDNS      func(context.Context, DNSRecord) error
-	DeleteTunnel   func(context.Context, string) error
-	RemovePath     func(string) error
-	DeleteToken    func() error
+	DeleteDNS       func(context.Context, DNSRecord) error
+	DeleteTunnel    func(context.Context, string) error
+	DeleteAccessApp func(context.Context, string) error
+	RemovePath      func(string) error
+	DeleteToken     func() error
 }
 
 // Outcome is the result of a single teardown step.
@@ -169,6 +180,17 @@ func Execute(ctx context.Context, plan Plan, actions Actions) Report {
 		if plan.Cloudflare.Creds.Present && actions.RemovePath != nil {
 			creds := plan.Cloudflare.Creds
 			report.run("Remove "+creds.Label, func() error { return actions.RemovePath(creds.Path) })
+		}
+	}
+
+	// Access apps are independent of the tunnel, so they are removed whenever
+	// Cloudflare cleanup is requested (not gated on tunnel resolution).
+	if plan.Options.IncludeCloudflare && actions.DeleteAccessApp != nil {
+		for _, app := range plan.Cloudflare.AccessApps {
+			accessApp := app
+			report.run("Delete Access app "+accessApp.Hostname, func() error {
+				return actions.DeleteAccessApp(ctx, accessApp.AppID)
+			})
 		}
 	}
 
