@@ -222,6 +222,8 @@ func newOrbstackExposeCommand(configPath *string) *cobra.Command {
 	var domain string
 	var target string
 	var detach bool
+	var tcp bool
+	var port int
 
 	cmd := &cobra.Command{
 		Use:   "expose <container> [subdomain]",
@@ -229,7 +231,7 @@ func newOrbstackExposeCommand(configPath *string) *cobra.Command {
 		Long: "Create a route from <subdomain>.<domain> to the container's\n" +
 			"<name>.orb.local domain, then open the HTTP dashboard focused on it.\n" +
 			"The subdomain defaults to the container's custom domain label, or its\n" +
-			"name. Pass a second argument to choose your own (e.g. app1).",
+			"name. Pass --tcp to expose a TCP service (database, etc.) instead of HTTP.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			containers, err := newOrbstackClient().List(cmd.Context())
@@ -244,13 +246,44 @@ func newOrbstackExposeCommand(configPath *string) *cobra.Command {
 			if len(args) == 2 {
 				subdomain = args[1]
 			}
+			if tcp {
+				return exposeOrbstackTCP(cmd, configPath, container, subdomain, domain, port)
+			}
 			return exposeOrbstackContainer(cmd, configPath, container, subdomain, domain, target, detach)
 		},
 	}
 	cmd.Flags().StringVar(&domain, "domain", "", "domain to use for this route")
 	cmd.Flags().StringVar(&target, "target", "", "override the upstream URL (defaults to http://<name>.orb.local)")
 	cmd.Flags().BoolVar(&detach, "detach", false, "create the route and return instead of opening the dashboard")
+	cmd.Flags().BoolVar(&tcp, "tcp", false, "expose a TCP service (database, SSH, …) instead of HTTP")
+	cmd.Flags().IntVar(&port, "port", 0, "container port for --tcp (defaults to its exposed port)")
 	return cmd
+}
+
+// exposeOrbstackTCP exposes a container's TCP port via a cloudflared tcp:// ingress.
+func exposeOrbstackTCP(cmd *cobra.Command, configPath *string, container orbstack.Container, subdomain, domainFlag string, port int) error {
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	if port == 0 {
+		if container.HTTPPort > 0 {
+			port = container.HTTPPort
+		} else if len(container.ExposedPorts) > 0 {
+			port = container.ExposedPorts[0]
+		}
+	}
+	if port == 0 {
+		return fmt.Errorf("%s exposes no port; pass --port", container.Name)
+	}
+	if strings.TrimSpace(subdomain) == "" {
+		subdomain = container.DefaultSubdomain()
+	}
+	hostname, err := hostnameForRoute(subdomain, domainFlag, cfg)
+	if err != nil {
+		return err
+	}
+	return applyTCPExpose(cmd, cfg, *configPath, hostname, fmt.Sprintf("%s:%d", container.OrbDomain, port))
 }
 
 // exposeOrbstackContainer creates the route for a container and (unless detach)

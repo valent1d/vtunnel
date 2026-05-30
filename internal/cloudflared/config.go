@@ -249,6 +249,114 @@ func findIngressIndex(cfg Config, hostname string) int {
 	return -1
 }
 
+// PlanAddIngress plans adding (or updating) a single ingress rule for an exact
+// hostname — used for TCP services. The rule is inserted before any wildcard
+// rule so cloudflared matches it first (ingress is evaluated top-to-bottom).
+// The tunnel must already be configured (run onboarding first).
+func PlanAddIngress(path, hostname, service string) (Plan, error) {
+	plan := Plan{Path: path}
+	cfg, err := Load(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return plan, fmt.Errorf("cloudflared config %s not found — run `vtunnel onboarding` first", path)
+	}
+	if err != nil {
+		return plan, err
+	}
+	plan.Exists = true
+	if strings.TrimSpace(cfg.Tunnel) == "" {
+		return plan, errors.New("cloudflared config has no tunnel — run `vtunnel onboarding` first")
+	}
+
+	if index := findIngressIndex(cfg, hostname); index < 0 {
+		cfg.Ingress = insertBeforeWildcard(cfg.Ingress, IngressRule{Hostname: hostname, Service: service})
+		plan.Changes = append(plan.Changes, Change{Kind: "add-ingress", Hostname: hostname, To: service})
+	} else if !servicesEquivalent(cfg.Ingress[index].Service, service) {
+		from := cfg.Ingress[index].Service
+		cfg.Ingress[index].Service = service
+		plan.Changes = append(plan.Changes, Change{Kind: "update-ingress", Hostname: hostname, From: from, To: service})
+	}
+	if len(cfg.Ingress) > 0 && !hasFallbackRule(cfg.Ingress) {
+		cfg.Ingress = append(cfg.Ingress, IngressRule{Service: "http_status:404"})
+		plan.Changes = append(plan.Changes, Change{Kind: "add-fallback", To: "http_status:404"})
+	}
+	plan.Config = cfg
+	return plan, nil
+}
+
+// PlanRemoveIngress plans removing the ingress rule for an exact hostname.
+func PlanRemoveIngress(path, hostname string) (Plan, error) {
+	plan := Plan{Path: path}
+	cfg, err := Load(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return plan, nil
+	}
+	if err != nil {
+		return plan, err
+	}
+	plan.Exists = true
+	index := findIngressIndex(cfg, hostname)
+	if index < 0 {
+		plan.Config = cfg
+		return plan, nil
+	}
+	cfg.Ingress = append(cfg.Ingress[:index:index], cfg.Ingress[index+1:]...)
+	plan.Changes = append(plan.Changes, Change{Kind: "remove-ingress", Hostname: hostname})
+	plan.Config = cfg
+	return plan, nil
+}
+
+// TCPIngress returns the ingress rules whose service is a tcp:// upstream.
+func TCPIngress(path string) ([]IngressRule, error) {
+	cfg, err := Load(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var tcp []IngressRule
+	for _, rule := range cfg.Ingress {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rule.Service)), "tcp://") {
+			tcp = append(tcp, rule)
+		}
+	}
+	return tcp, nil
+}
+
+// IngressService returns the service for an exact hostname, or "" if absent.
+func IngressService(path, hostname string) string {
+	cfg, err := Load(path)
+	if err != nil {
+		return ""
+	}
+	if index := findIngressIndex(cfg, hostname); index >= 0 {
+		return cfg.Ingress[index].Service
+	}
+	return ""
+}
+
+// insertBeforeWildcard inserts a specific-hostname rule before the first
+// wildcard rule (or the fallback), so cloudflared matches the specific rule first.
+func insertBeforeWildcard(rules []IngressRule, rule IngressRule) []IngressRule {
+	out := make([]IngressRule, 0, len(rules)+1)
+	inserted := false
+	for _, existing := range rules {
+		if !inserted && (isWildcardRule(existing) || isFallbackRule(existing)) {
+			out = append(out, rule)
+			inserted = true
+		}
+		out = append(out, existing)
+	}
+	if !inserted {
+		out = append(out, rule)
+	}
+	return out
+}
+
+func isWildcardRule(rule IngressRule) bool {
+	return strings.HasPrefix(strings.TrimSpace(rule.Hostname), "*.")
+}
+
 func insertBeforeFallback(rules []IngressRule, rule IngressRule) []IngressRule {
 	out := make([]IngressRule, 0, len(rules)+1)
 	inserted := false

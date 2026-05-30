@@ -196,3 +196,70 @@ func writeConfig(t *testing.T, content string) string {
 	}
 	return path
 }
+
+func TestPlanAddIngressInsertsTCPBeforeWildcard(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	seed := `tunnel: t-1
+credentials-file: /creds.json
+ingress:
+  - hostname: "*.example.test"
+    service: http://127.0.0.1:8787
+  - service: http_status:404
+`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := PlanAddIngress(path, "db.example.test", "tcp://127.0.0.1:3306")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Changes) != 1 || plan.Changes[0].Kind != "add-ingress" {
+		t.Fatalf("changes = %+v", plan.Changes)
+	}
+	if _, err := WritePlan(plan, time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Order must be: db (tcp) → *.example.test → fallback.
+	if len(cfg.Ingress) != 3 ||
+		cfg.Ingress[0].Hostname != "db.example.test" ||
+		!isWildcardRule(cfg.Ingress[1]) ||
+		!isFallbackRule(cfg.Ingress[2]) {
+		t.Fatalf("ingress order wrong: %+v", cfg.Ingress)
+	}
+	if cfg.Ingress[0].Service != "tcp://127.0.0.1:3306" {
+		t.Fatalf("tcp service = %q", cfg.Ingress[0].Service)
+	}
+
+	tcp, err := TCPIngress(path)
+	if err != nil || len(tcp) != 1 || tcp[0].Hostname != "db.example.test" {
+		t.Fatalf("TCPIngress = %+v err = %v", tcp, err)
+	}
+
+	// Removing it.
+	rmPlan, err := PlanRemoveIngress(path, "db.example.test")
+	if err != nil || len(rmPlan.Changes) != 1 {
+		t.Fatalf("remove plan = %+v err = %v", rmPlan, err)
+	}
+	if _, err := WritePlan(rmPlan, time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := TCPIngress(path); len(got) != 0 {
+		t.Fatalf("tcp rule should be gone: %+v", got)
+	}
+}
+
+func TestPlanAddIngressRequiresTunnel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("ingress: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PlanAddIngress(path, "db.example.test", "tcp://127.0.0.1:3306"); err == nil {
+		t.Fatal("expected error when no tunnel configured")
+	}
+}
