@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +18,10 @@ import (
 	"vtunnel/internal/config"
 	"vtunnel/internal/routes"
 )
+
+// accessSetupPoll is how often `access setup` re-checks Zero Trust readiness
+// while the user completes the dashboard step. Overridable in tests.
+var accessSetupPoll = 3 * time.Second
 
 // errAccessWriteScope is returned when the token can read but not write Access.
 var errAccessWriteScope = errors.New("your Cloudflare token cannot create Access apps — run: vtunnel cloudflare auth --access")
@@ -27,10 +35,78 @@ func newAccessCommand(configPath *string) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newAccessStatusCommand(configPath),
+		newAccessSetupCommand(),
 		newAccessProtectCommand(configPath),
 		newAccessUnprotectCommand(configPath),
 		newAccessIdpCommand(),
 	)
+	return cmd
+}
+
+func newAccessSetupCommand() *cobra.Command {
+	var noOpen bool
+	cmd := &cobra.Command{
+		Use:   "setup",
+		Short: "Guided Cloudflare Access (Zero Trust) setup",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out := cmd.OutOrStdout()
+			client, _, err := newCloudflareClientFromKeychain()
+			if errors.Is(err, cfapi.ErrMissingToken) {
+				fmt.Fprintln(out, "First, create a Cloudflare API token with Access scope:")
+				fmt.Fprintln(out, "  vtunnel cloudflare auth --access")
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			accountID, err := resolveAccountID(cmd.Context(), client)
+			if err != nil {
+				return err
+			}
+
+			switch status := cfapi.DetectAccess(cmd.Context(), client, accountID); status.State {
+			case cfapi.AccessReady:
+				fmt.Fprintf(out, "✓ Zero Trust is enabled (team: %s).\n", status.AuthDomain)
+				fmt.Fprintln(out, "Protect a route: vtunnel http <port> <sub> --protect --allow you@example.com")
+				return nil
+			case cfapi.AccessTokenUnscoped:
+				fmt.Fprintln(out, "Your token can't read Access. Re-create it with: vtunnel cloudflare auth --access")
+				return nil
+			}
+
+			fmt.Fprintln(out, "Zero Trust is not enabled yet. One-time setup in the dashboard:")
+			fmt.Fprintln(out, "  1. Open https://one.dash.cloudflare.com")
+			fmt.Fprintln(out, "  2. Pick a team name → your login domain becomes <team>.cloudflareaccess.com")
+			fmt.Fprintln(out, "  3. Choose the Free plan (≤50 users; a card is required even on Free — you are not charged)")
+			if !noOpen {
+				_ = openURL("https://one.dash.cloudflare.com")
+			}
+			fmt.Fprintln(out, "\nWaiting for Zero Trust to become active… (Ctrl+C to stop)")
+
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			ticker := time.NewTicker(accessSetupPoll)
+			defer ticker.Stop()
+			waited := 0
+			for {
+				select {
+				case <-ctx.Done():
+					fmt.Fprintln(out, "Stopped. Re-run `vtunnel access setup` when ready.")
+					return nil
+				case <-ticker.C:
+					if status := cfapi.DetectAccess(ctx, client, accountID); status.State == cfapi.AccessReady {
+						fmt.Fprintf(out, "✓ Zero Trust is now enabled (team: %s).\n", status.AuthDomain)
+						fmt.Fprintln(out, "Next: run `vtunnel cloudflare auth --access` (if not done), then protect a route.")
+						return nil
+					}
+					if waited++; waited%10 == 0 {
+						fmt.Fprintln(out, "  still waiting…")
+					}
+				}
+			}
+		},
+	}
+	cmd.Flags().BoolVar(&noOpen, "no-open", false, "do not open the dashboard in a browser")
 	return cmd
 }
 

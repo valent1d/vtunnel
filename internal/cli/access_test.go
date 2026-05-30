@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	cfapi "vtunnel/internal/cloudflare"
 )
@@ -286,6 +288,64 @@ func TestAccessIdpAddAuthentikRequiresFlags(t *testing.T) {
 	// Should print the redirect URI to guide the user.
 	if !strings.Contains(out, "cdn-cgi/access/callback") {
 		t.Fatalf("expected redirect URI guidance, got %q", out)
+	}
+}
+
+func TestAccessSetupBecomesReadyByPolling(t *testing.T) {
+	var orgCalls int32
+	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts":
+			writeCloudflareEnvelope(t, w, []map[string]any{{"id": "acct-1", "name": "Acme"}})
+		case "/accounts/acct-1/access/organizations":
+			// First check (initial detection) reports not-set-up; later polls report ready.
+			if atomic.AddInt32(&orgCalls, 1) <= 1 {
+				writeCloudflareEnvelope(t, w, map[string]any{"auth_domain": ""})
+			} else {
+				writeCloudflareEnvelope(t, w, map[string]any{"auth_domain": "acme.cloudflareaccess.com"})
+			}
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer cf.Close()
+	t.Setenv(cfapi.BaseURLEnv, cf.URL)
+	stubCloudflareKeychainToken(t, "tok", nil)
+
+	prev := accessSetupPoll
+	accessSetupPoll = 5 * time.Millisecond
+	t.Cleanup(func() { accessSetupPoll = prev })
+
+	out, err := executeCommand(context.Background(), "access", "setup", "--no-open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "now enabled") {
+		t.Fatalf("expected setup to detect activation, got %q", out)
+	}
+}
+
+func TestAccessSetupAlreadyReady(t *testing.T) {
+	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts":
+			writeCloudflareEnvelope(t, w, []map[string]any{{"id": "acct-1", "name": "Acme"}})
+		case "/accounts/acct-1/access/organizations":
+			writeCloudflareEnvelope(t, w, map[string]any{"auth_domain": "acme.cloudflareaccess.com"})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer cf.Close()
+	t.Setenv(cfapi.BaseURLEnv, cf.URL)
+	stubCloudflareKeychainToken(t, "tok", nil)
+
+	out, err := executeCommand(context.Background(), "access", "setup", "--no-open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Zero Trust is enabled") {
+		t.Fatalf("out = %q", out)
 	}
 }
 
