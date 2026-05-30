@@ -29,6 +29,7 @@ func newAccessCommand(configPath *string) *cobra.Command {
 		newAccessStatusCommand(configPath),
 		newAccessProtectCommand(configPath),
 		newAccessUnprotectCommand(configPath),
+		newAccessIdpCommand(),
 	)
 	return cmd
 }

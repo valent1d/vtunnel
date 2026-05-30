@@ -202,6 +202,93 @@ func TestProtectHostnameSSORequiresKnownIdP(t *testing.T) {
 	}
 }
 
+func TestFetchOIDCEndpoints(t *testing.T) {
+	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/application/o/cf/.well-known/openid-configuration" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"authorization_endpoint": "https://auth/authorize",
+			"token_endpoint":         "https://auth/token",
+			"jwks_uri":               "https://auth/jwks",
+		})
+	}))
+	defer issuer.Close()
+
+	auth, token, certs, err := fetchOIDCEndpoints(context.Background(), issuer.URL+"/application/o/cf/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth != "https://auth/authorize" || token != "https://auth/token" || certs != "https://auth/jwks" {
+		t.Fatalf("endpoints = %q %q %q", auth, token, certs)
+	}
+}
+
+func TestAccessIdpAddAuthentik(t *testing.T) {
+	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"authorization_endpoint": "https://auth/authorize",
+			"token_endpoint":         "https://auth/token",
+			"jwks_uri":               "https://auth/jwks",
+		})
+	}))
+	defer issuer.Close()
+
+	var created cfapi.IdentityProvider
+	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/accounts":
+			writeCloudflareEnvelope(t, w, []map[string]any{{"id": "acct-1", "name": "Acme"}})
+		case r.URL.Path == "/accounts/acct-1/access/identity_providers" && r.Method == http.MethodPost:
+			_ = json.NewDecoder(r.Body).Decode(&created)
+			writeCloudflareEnvelope(t, w, map[string]any{"id": "idp-1", "type": created.Type, "name": created.Name})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer cf.Close()
+
+	t.Setenv(cfapi.BaseURLEnv, cf.URL)
+	stubCloudflareKeychainToken(t, "tok", nil)
+
+	out, err := executeCommand(context.Background(), "access", "idp", "add", "authentik",
+		"--issuer", issuer.URL, "--client-id", "cid", "--client-secret", "sec", "--name", "VLTN Connect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Added identity provider") {
+		t.Fatalf("output = %q", out)
+	}
+	if created.Type != "oidc" || created.Config.ClientID != "cid" || created.Config.AuthURL != "https://auth/authorize" || created.Config.CertsURL != "https://auth/jwks" {
+		t.Fatalf("created idp = %+v", created)
+	}
+}
+
+func TestAccessIdpAddAuthentikRequiresFlags(t *testing.T) {
+	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/accounts":
+			writeCloudflareEnvelope(t, w, []map[string]any{{"id": "acct-1", "name": "Acme"}})
+		case "/accounts/acct-1/access/organizations":
+			writeCloudflareEnvelope(t, w, map[string]any{"auth_domain": "acme.cloudflareaccess.com"})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer cf.Close()
+	t.Setenv(cfapi.BaseURLEnv, cf.URL)
+	stubCloudflareKeychainToken(t, "tok", nil)
+
+	out, err := executeCommand(context.Background(), "access", "idp", "add", "authentik")
+	if err == nil {
+		t.Fatalf("expected error for missing flags, out=%q", out)
+	}
+	// Should print the redirect URI to guide the user.
+	if !strings.Contains(out, "cdn-cgi/access/callback") {
+		t.Fatalf("expected redirect URI guidance, got %q", out)
+	}
+}
+
 func TestAccessStatusNoToken(t *testing.T) {
 	stubCloudflareKeychainToken(t, "", cfapi.ErrMissingToken)
 	out, err := executeCommand(context.Background(), "access", "status")
