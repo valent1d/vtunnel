@@ -51,6 +51,9 @@ func newTCPCommand(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if handled, err := maybeSuggestSSH(cmd, &cfg, *configPath, hostname, target, args[1]); handled || err != nil {
+				return err
+			}
 			return applyTCPExpose(cmd, cfg, *configPath, hostname, target)
 		},
 	}

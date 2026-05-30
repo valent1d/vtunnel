@@ -18,6 +18,15 @@ type Config struct {
 	Proxy         ListenConfig      `yaml:"proxy"`
 	API           ListenConfig      `yaml:"api"`
 	Cloudflared   CloudflaredConfig `yaml:"cloudflared"`
+	Prefs         Preferences       `yaml:"prefs,omitempty"`
+}
+
+// Preferences are persisted UX choices the user makes interactively, such as
+// "don't ask me this again" toggles.
+type Preferences struct {
+	// SuppressSSHSuggestion silences the "use vtunnel ssh instead?" prompt that
+	// appears when exposing an SSH port (22) over a plain TCP tunnel.
+	SuppressSSHSuggestion bool `yaml:"suppress_ssh_suggestion,omitempty"`
 }
 
 type ListenConfig struct {

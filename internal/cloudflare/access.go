@@ -62,6 +62,8 @@ type AccessApp struct {
 	AutoRedirectToIdentity bool                `json:"auto_redirect_to_identity"`
 	SessionDuration        string              `json:"session_duration,omitempty"`
 	AppLauncherVisible     bool                `json:"app_launcher_visible"`
+	// SkipInterstitial is set for browser-rendered SSH/VNC apps (type "ssh").
+	SkipInterstitial bool `json:"skip_interstitial,omitempty"`
 }
 
 // AccessPolicy is an allow/deny rule attached to an app. Include rules are

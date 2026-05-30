@@ -184,6 +184,22 @@ psql -h 127.0.0.1 -p 5432 …           # then point your client at the local po
 
 (`vtunnel tcp connect` wraps `cloudflared access tcp`; `--port` defaults to the service's port.)
 
+## SSH in the browser (zero-install)
+
+For SSH specifically there's a better option than a TCP tunnel: **`vtunnel ssh`** renders a full SSH terminal **in the browser**. Visitors open a URL, sign in through a Cloudflare Access login, and get a terminal — **no SSH client and no `cloudflared`** on their side. Cloudflare renders the session at its edge.
+
+```bash
+vtunnel ssh box --allow you@example.com           # localhost:22 → https://box.<domain>
+vtunnel ssh box --allow @example.com --target 192.168.1.10:22
+vtunnel ssh box --allow you@example.com --idp Authentik   # SSO instead of email OTP
+vtunnel ssh list                                  # list browser SSH endpoints
+vtunnel ssh rm box                                # remove one (also deletes its Access app)
+```
+
+`--allow` is **required**: browser SSH is always gated by a Cloudflare Access login, and each signed-in user's **email prefix must match their SSH username** on the server (e.g. `you@example.com` logs in as `you`). Login defaults to email one-time PIN; pass `--idp <name>` for SSO ([see Access](#protect-routes-with-cloudflare-access)). This requires Zero Trust to be enabled.
+
+> Because of this, when you run `vtunnel tcp 22 …` (or any host on port 22) vtunnel notices it's SSH and offers to set up browser SSH instead. Pick **yes** and it walks you through it; pick **no** to keep the plain TCP tunnel. Tick *Don't ask me again* to silence the prompt (stored as `prefs.suppress_ssh_suggestion` in the config).
+
 ## One-time setup
 
 Most people just run `vtunnel onboarding` and never touch this. If you'd rather drive setup yourself, `vtunnel setup` runs the same diagnostics and applies fixes with explicit flags (it prints a dry-run plan by default).

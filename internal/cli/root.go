@@ -88,6 +88,7 @@ func NewRootCommand() *cobra.Command {
 		newOrbstackCommand(&configPath),
 		newAccessCommand(&configPath),
 		newTCPCommand(&configPath),
+		newSSHCommand(&configPath),
 		newUninstallCommand(&configPath),
 	)
 
