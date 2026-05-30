@@ -2,10 +2,15 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -36,8 +41,161 @@ func newOrbstackCommand(configPath *string) *cobra.Command {
 	cmd.AddCommand(
 		newOrbstackListCommand(configPath),
 		newOrbstackExposeCommand(configPath),
+		newOrbstackWatchCommand(configPath),
 	)
 	return cmd
+}
+
+func newOrbstackWatchCommand(configPath *string) *cobra.Command {
+	var domain string
+	var interval time.Duration
+
+	cmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Auto-expose OrbStack HTTP containers as they start and stop",
+		Long: "Continuously reconcile routes with running OrbStack containers: every\n" +
+			"HTTP container gets a route, and routes for stopped containers are removed.\n" +
+			"Only routes it created are removed — manual routes are left untouched.\n" +
+			"Runs in the foreground until Ctrl+C.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+			if err := config.EnsureDirs(); err != nil {
+				return err
+			}
+			if routes.NormalizeHostname(domain) == "" && routes.NormalizeHostname(cfg.DefaultDomain) == "" {
+				return errors.New("no domain configured; pass --domain or set default_domain in ~/.config/vtunnel/config.yml")
+			}
+
+			runtimeCfg := configForRouteDomain(cfg, domain)
+			engine := newCLIOnboardingEngine(*configPath, runtimeCfg)
+			if _, err := engine.EnsureHTTPRuntime(cmd.Context()); err != nil {
+				return err
+			}
+
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			out := cmd.OutOrStdout()
+			client := api.New(cfg)
+			orb := newOrbstackClient()
+			fmt.Fprintf(out, "Watching OrbStack containers every %s — Ctrl+C to stop.\n", interval)
+
+			reconcile := func() {
+				containers, lerr := orb.List(ctx)
+				if lerr != nil {
+					if ctx.Err() == nil {
+						fmt.Fprintln(out, "orbstack:", lerr)
+					}
+					return
+				}
+				existing, rerr := client.ListRoutes(ctx)
+				if rerr != nil {
+					if ctx.Err() == nil {
+						fmt.Fprintln(out, "daemon:", rerr)
+					}
+					return
+				}
+				create, remove, cerr := reconcileOrbstackRoutes(containers, existing, cfg, domain)
+				if cerr != nil {
+					fmt.Fprintln(out, cerr)
+					return
+				}
+				for _, route := range create {
+					if err := client.AddRoute(ctx, route); err != nil {
+						fmt.Fprintf(out, "  ✗ expose %s: %v\n", route.Hostname, err)
+						continue
+					}
+					fmt.Fprintf(out, "  ✓ exposed %s → %s\n", route.Hostname, route.Target)
+				}
+				for _, hostname := range remove {
+					if err := client.DeleteRoute(ctx, hostname); err != nil {
+						fmt.Fprintf(out, "  ✗ remove %s: %v\n", hostname, err)
+						continue
+					}
+					fmt.Fprintf(out, "  ✓ removed %s (container stopped)\n", hostname)
+				}
+			}
+
+			reconcile()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					fmt.Fprintln(out, "\nStopped watching.")
+					return nil
+				case <-ticker.C:
+					reconcile()
+				}
+			}
+		},
+	}
+	cmd.Flags().StringVar(&domain, "domain", "", "domain to use for auto-created routes")
+	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "how often to poll OrbStack for changes")
+	return cmd
+}
+
+// reconcileOrbstackRoutes computes the routes to create and the hostnames to
+// remove so that every running HTTP container has a watch-managed route and no
+// watch-managed route points at a container that is gone. Manual routes (those
+// without Orbstack metadata, or not Managed) are never created over nor removed.
+func reconcileOrbstackRoutes(containers []orbstack.Container, existing []routes.Route, cfg config.Config, domainFlag string) (create []routes.Route, remove []string, err error) {
+	routedDomains := map[string]bool{}            // orb domain -> already has any route
+	managedByDomain := map[string]routes.Route{}  // orb domain -> watch-managed route
+	for _, route := range existing {
+		if host := targetHost(route.Target); host != "" {
+			routedDomains[host] = true
+		}
+		if route.Orbstack != nil && route.Orbstack.Managed && route.Orbstack.OrbDomain != "" {
+			managedByDomain[strings.ToLower(route.Orbstack.OrbDomain)] = route
+		}
+	}
+
+	runningDomains := map[string]bool{}
+	for _, container := range containers {
+		if !container.HTTP {
+			continue
+		}
+		domain := strings.ToLower(container.OrbDomain)
+		runningDomains[domain] = true
+		if routedDomains[domain] {
+			continue // already exposed (manually or by a previous reconcile)
+		}
+		hostname, herr := hostnameForRoute(container.DefaultSubdomain(), domainFlag, cfg)
+		if herr != nil {
+			return nil, nil, herr
+		}
+		create = append(create, routes.Route{
+			Hostname: hostname,
+			Target:   container.Target(),
+			Orbstack: &routes.OrbstackInfo{
+				Container:     container.Name,
+				Image:         container.Image,
+				OrbDomain:     container.OrbDomain,
+				CustomDomains: container.CustomDomains,
+				Managed:       true,
+			},
+		})
+	}
+
+	for domain, route := range managedByDomain {
+		if !runningDomains[domain] {
+			remove = append(remove, route.Hostname)
+		}
+	}
+	return create, remove, nil
+}
+
+// targetHost returns the lowercased host (without port) of a route target URL.
+func targetHost(target string) string {
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
 }
 
 func newOrbstackListCommand(configPath *string) *cobra.Command {
@@ -165,8 +323,8 @@ func exposedTargets(ctx context.Context, cfg config.Config) map[string]string {
 	}
 	out := make(map[string]string, len(list))
 	for _, route := range list {
-		if parsed, perr := url.Parse(route.Target); perr == nil {
-			out[strings.ToLower(parsed.Hostname())] = route.Hostname
+		if host := targetHost(route.Target); host != "" {
+			out[host] = route.Hostname
 		}
 	}
 	return out

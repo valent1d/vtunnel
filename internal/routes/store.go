@@ -30,6 +30,9 @@ type OrbstackInfo struct {
 	Image         string   `json:"image,omitempty"`
 	OrbDomain     string   `json:"orb_domain,omitempty"`
 	CustomDomains []string `json:"custom_domains,omitempty"`
+	// Managed marks routes created by `vtunnel orbstack watch`, so the watcher
+	// only ever removes its own auto-created routes — never manual ones.
+	Managed bool `json:"managed,omitempty"`
 }
 
 type Store struct {

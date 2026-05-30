@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"vtunnel/internal/config"
 	"vtunnel/internal/orbstack"
+	"vtunnel/internal/routes"
 )
 
 const orbstackInspectJSON = `[
@@ -95,6 +97,89 @@ func TestOrbstackExposeUnknownContainer(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("error = %v, want it to mention 'not found'", err)
+	}
+}
+
+func TestReconcileCreatesRoutesForRunningContainers(t *testing.T) {
+	cfg := config.Config{DefaultDomain: "example.test"}
+	containers := []orbstack.Container{
+		{Name: "dolibarr-v23", OrbDomain: "dolibarr-v23.orb.local", CustomDomains: []string{"doli23.local"}, HTTP: true},
+		{Name: "doli-db", OrbDomain: "doli-db.orb.local", HTTP: false}, // non-HTTP: ignored
+	}
+
+	create, remove, err := reconcileOrbstackRoutes(containers, nil, cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remove) != 0 {
+		t.Fatalf("nothing to remove, got %v", remove)
+	}
+	if len(create) != 1 {
+		t.Fatalf("expected 1 route to create, got %d (%+v)", len(create), create)
+	}
+	r := create[0]
+	if r.Hostname != "doli23.example.test" {
+		t.Fatalf("hostname = %q, want doli23.example.test", r.Hostname)
+	}
+	if r.Target != "http://dolibarr-v23.orb.local" {
+		t.Fatalf("target = %q", r.Target)
+	}
+	if r.Orbstack == nil || !r.Orbstack.Managed {
+		t.Fatalf("created route should be watch-managed: %+v", r.Orbstack)
+	}
+}
+
+func TestReconcileSkipsAlreadyRoutedContainers(t *testing.T) {
+	cfg := config.Config{DefaultDomain: "example.test"}
+	containers := []orbstack.Container{
+		{Name: "dolibarr-v23", OrbDomain: "dolibarr-v23.orb.local", HTTP: true},
+	}
+	existing := []routes.Route{
+		{Hostname: "manual.example.test", Target: "http://dolibarr-v23.orb.local"}, // manual, no metadata
+	}
+	create, remove, err := reconcileOrbstackRoutes(containers, existing, cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(create) != 0 {
+		t.Fatalf("should not re-create an already-routed container, got %+v", create)
+	}
+	if len(remove) != 0 {
+		t.Fatalf("should not remove anything, got %v", remove)
+	}
+}
+
+func TestReconcileRemovesManagedRouteWhenContainerGone(t *testing.T) {
+	cfg := config.Config{DefaultDomain: "example.test"}
+	existing := []routes.Route{
+		{
+			Hostname: "doli23.example.test",
+			Target:   "http://dolibarr-v23.orb.local",
+			Orbstack: &routes.OrbstackInfo{Container: "dolibarr-v23", OrbDomain: "dolibarr-v23.orb.local", Managed: true},
+		},
+		{
+			Hostname: "kept.example.test",
+			Target:   "http://other.orb.local",
+			Orbstack: &routes.OrbstackInfo{Container: "other", OrbDomain: "other.orb.local"}, // manual: not managed
+		},
+	}
+	// No containers running.
+	create, remove, err := reconcileOrbstackRoutes(nil, existing, cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(create) != 0 {
+		t.Fatalf("nothing to create, got %+v", create)
+	}
+	if len(remove) != 1 || remove[0] != "doli23.example.test" {
+		t.Fatalf("should remove only the managed orphan, got %v", remove)
+	}
+}
+
+func TestReconcileErrorsWithoutDomain(t *testing.T) {
+	containers := []orbstack.Container{{Name: "web", OrbDomain: "web.orb.local", HTTP: true}}
+	if _, _, err := reconcileOrbstackRoutes(containers, nil, config.Config{}, ""); err == nil {
+		t.Fatal("expected error when no domain is configured")
 	}
 }
 
