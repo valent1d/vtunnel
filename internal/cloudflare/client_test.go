@@ -179,6 +179,43 @@ func TestClientCreatesAndUpdatesDNSRecords(t *testing.T) {
 	}
 }
 
+func TestClientDeletesDNSRecord(t *testing.T) {
+	var deleted bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/zones/zone-id/dns_records/record-id" {
+			deleted = true
+			writeEnvelope(t, w, map[string]any{"id": "record-id"})
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	client, err := New("test-token", WithBaseURL(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteDNSRecord(context.Background(), "zone-id", "record-id"); err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Fatal("expected DELETE request")
+	}
+}
+
+func TestDeleteDNSRecordValidatesInput(t *testing.T) {
+	client, err := New("test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteDNSRecord(context.Background(), "", "record-id"); err == nil {
+		t.Fatal("expected error for empty zone id")
+	}
+	if err := client.DeleteDNSRecord(context.Background(), "zone-id", ""); err == nil {
+		t.Fatal("expected error for empty record id")
+	}
+}
+
 func TestNewRejectsMissingToken(t *testing.T) {
 	_, err := New("")
 	if err != ErrMissingToken {

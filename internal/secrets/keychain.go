@@ -52,6 +52,12 @@ func (store Store) Set(account string, secret string) error {
 	return nil
 }
 
+// Delete removes every Keychain entry for the account. It is idempotent:
+// deleting an account that does not exist returns nil.
+func (store Store) Delete(account string) error {
+	return deleteAll(store.service(), account)
+}
+
 func deleteAll(service string, account string) error {
 	for {
 		err := deleteOne(service, account)

@@ -198,6 +198,19 @@ func (c *Client) UpdateDNSRecord(ctx context.Context, zoneID string, recordID st
 	return record, err
 }
 
+func (c *Client) DeleteDNSRecord(ctx context.Context, zoneID string, recordID string) error {
+	zoneID = strings.TrimSpace(zoneID)
+	recordID = strings.TrimSpace(recordID)
+	if zoneID == "" {
+		return errors.New("zone id is required")
+	}
+	if recordID == "" {
+		return errors.New("dns record id is required")
+	}
+	path := "/zones/" + url.PathEscape(zoneID) + "/dns_records/" + url.PathEscape(recordID)
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
 func IsAuthorizationError(err error) bool {
 	var apiErr apiError
 	if !errors.As(err, &apiErr) {
