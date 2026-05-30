@@ -35,6 +35,9 @@ type AccessInfo struct {
 	Mode      string   `json:"mode"`            // otp | email | sso
 	IdP       string   `json:"idp,omitempty"`   // identity provider name (sso)
 	Allow     []string `json:"allow,omitempty"` // emails / @domains / everyone
+	// Paused is true when protection is temporarily bypassed (route public)
+	// while keeping the app and allow-list so it can be resumed.
+	Paused bool `json:"paused,omitempty"`
 }
 
 // OrbstackInfo describes the OrbStack container behind a route.

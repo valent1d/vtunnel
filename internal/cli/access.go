@@ -38,6 +38,8 @@ func newAccessCommand(configPath *string) *cobra.Command {
 		newAccessSetupCommand(),
 		newAccessProtectCommand(configPath),
 		newAccessUnprotectCommand(configPath),
+		newAccessPauseCommand(configPath),
+		newAccessResumeCommand(configPath),
 		newAccessIdpCommand(),
 	)
 	return cmd
@@ -402,6 +404,109 @@ func unprotectHostname(ctx context.Context, client *cfapi.Client, accountID stri
 	return client.DeleteAccessApp(ctx, accountID, info.AppID)
 }
 
+// pauseProtection swaps the app's policy for a bypass-everyone policy, so the
+// route is public again while the app and allow-list are preserved. It mutates
+// info (PolicyIDs + Paused). Fail-closed: old policies are dropped first.
+func pauseProtection(ctx context.Context, client *cfapi.Client, accountID string, info *routes.AccessInfo) error {
+	for _, id := range info.PolicyIDs {
+		_ = client.DeleteAccessPolicy(ctx, accountID, info.AppID, id)
+	}
+	policy, err := client.CreateAccessPolicy(ctx, accountID, info.AppID, cfapi.AccessPolicy{
+		Name:     "vtunnel-paused",
+		Decision: "bypass",
+		Include:  []map[string]any{cfapi.EveryoneRule()},
+	})
+	if err != nil {
+		return err
+	}
+	info.PolicyIDs = []string{policy.ID}
+	info.Paused = true
+	return nil
+}
+
+// resumeProtection restores the allow policy from the stored allow-list.
+func resumeProtection(ctx context.Context, client *cfapi.Client, accountID string, info *routes.AccessInfo) error {
+	rules, err := buildAllowRules(info.Mode, info.Allow, true)
+	if err != nil {
+		return err
+	}
+	for _, id := range info.PolicyIDs {
+		_ = client.DeleteAccessPolicy(ctx, accountID, info.AppID, id)
+	}
+	policy, err := client.CreateAccessPolicy(ctx, accountID, info.AppID, cfapi.AccessPolicy{
+		Name:     "vtunnel-access",
+		Decision: "allow",
+		Include:  rules,
+	})
+	if err != nil {
+		return err
+	}
+	info.PolicyIDs = []string{policy.ID}
+	info.Paused = false
+	return nil
+}
+
+func newAccessPauseCommand(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "pause <subdomain>",
+		Short: "Temporarily make a protected route public (keeps the config)",
+		Args:  cobra.ExactArgs(1),
+		RunE:  func(cmd *cobra.Command, args []string) error { return runPauseResume(cmd, configPath, args[0], true) },
+	}
+}
+
+func newAccessResumeCommand(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume <subdomain>",
+		Short: "Re-enable protection on a paused route",
+		Args:  cobra.ExactArgs(1),
+		RunE:  func(cmd *cobra.Command, args []string) error { return runPauseResume(cmd, configPath, args[0], false) },
+	}
+}
+
+func runPauseResume(cmd *cobra.Command, configPath *string, arg string, pause bool) error {
+	out := cmd.OutOrStdout()
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	hostname, err := hostnameForStop(arg, cfg)
+	if err != nil {
+		return err
+	}
+	route, ok := findRoute(cmd.Context(), cfg, hostname)
+	if !ok || route.Access == nil {
+		fmt.Fprintf(out, "%s is not protected.\n", hostname)
+		return nil
+	}
+	client, _, err := newCloudflareClientFromKeychain()
+	if err != nil {
+		return errAccessWriteScope
+	}
+	accountID, err := resolveAccountID(cmd.Context(), client)
+	if err != nil {
+		return err
+	}
+	if pause {
+		if err := pauseProtection(cmd.Context(), client, accountID, route.Access); err != nil {
+			return err
+		}
+	} else {
+		if err := resumeProtection(cmd.Context(), client, accountID, route.Access); err != nil {
+			return err
+		}
+	}
+	if err := api.New(cfg).AddRoute(cmd.Context(), route); err != nil {
+		return err
+	}
+	if pause {
+		fmt.Fprintf(out, "⏸ %s protection paused — PUBLIC until resumed.\n", hostname)
+	} else {
+		fmt.Fprintf(out, "🔒 %s protection resumed.\n", hostname)
+	}
+	return nil
+}
+
 func normalizeProtectMode(mode string) (string, error) {
 	switch strings.TrimSpace(strings.ToLower(mode)) {
 	case "", "otp":
@@ -534,6 +639,11 @@ func printProtectedRoutes(ctx context.Context, out io.Writer, configPath string)
 		if route.Access.IdP != "" {
 			detail += "  via " + route.Access.IdP
 		}
-		fmt.Fprintf(out, "  🔒 %-28s %s\n", route.Hostname, detail)
+		badge := "🔒"
+		if route.Access.Paused {
+			badge = "⏸"
+			detail += "  (paused — public)"
+		}
+		fmt.Fprintf(out, "  %s %-28s %s\n", badge, route.Hostname, detail)
 	}
 }

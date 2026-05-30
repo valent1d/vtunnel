@@ -12,6 +12,7 @@ import (
 	"time"
 
 	cfapi "vtunnel/internal/cloudflare"
+	"vtunnel/internal/routes"
 )
 
 func TestCloudflareTokenTemplateAccessScope(t *testing.T) {
@@ -182,6 +183,46 @@ func TestProtectHostnameCreatesAppAndPolicy(t *testing.T) {
 	}
 	if len(policies) != 1 || policies[0] != "allow" {
 		t.Fatalf("created policies = %v", policies)
+	}
+}
+
+func TestPauseAndResumeProtection(t *testing.T) {
+	var lastDecision string
+	var deleted []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/accounts/acct-1/access/apps/app-1/policies":
+			var pol cfapi.AccessPolicy
+			_ = json.NewDecoder(r.Body).Decode(&pol)
+			lastDecision = pol.Decision
+			writeCloudflareEnvelope(t, w, map[string]any{"id": "newpol", "decision": pol.Decision})
+		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/policies/"):
+			deleted = append(deleted, r.URL.Path)
+			writeCloudflareEnvelope(t, w, map[string]any{"id": "x"})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, _ := cfapi.New("tok", cfapi.WithBaseURL(server.URL))
+
+	info := &routes.AccessInfo{AppID: "app-1", PolicyIDs: []string{"old"}, Mode: "otp", Allow: []string{"@x.com"}}
+
+	if err := pauseProtection(context.Background(), client, "acct-1", info); err != nil {
+		t.Fatal(err)
+	}
+	if !info.Paused || lastDecision != "bypass" || info.PolicyIDs[0] != "newpol" {
+		t.Fatalf("after pause: paused=%v decision=%q ids=%v", info.Paused, lastDecision, info.PolicyIDs)
+	}
+
+	if err := resumeProtection(context.Background(), client, "acct-1", info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Paused || lastDecision != "allow" {
+		t.Fatalf("after resume: paused=%v decision=%q", info.Paused, lastDecision)
+	}
+	if len(deleted) != 2 {
+		t.Fatalf("expected 2 policy deletes (one per swap), got %d", len(deleted))
 	}
 }
 
