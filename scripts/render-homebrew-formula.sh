@@ -59,9 +59,21 @@ class Vtunnel < Formula
   end
 
   def caveats
+    config_dir = ENV["XDG_CONFIG_HOME"] || File.expand_path("~/.config")
+    config_file = File.join(config_dir, "vtunnel", "config.yml")
+    # Only nudge users who have not finished onboarding yet, so the hint shows
+    # on a fresh install but stays out of the way on every later upgrade.
+    return if File.exist?(config_file)
+
     <<~EOS
-      To start using vtunnel, run:
-        vtunnel onboarding
+
+      ────────────────────────────────────────────────
+        vtunnel is installed — one step left!
+
+        Run the guided setup:
+
+            vtunnel onboarding
+      ────────────────────────────────────────────────
     EOS
   end
 
