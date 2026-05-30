@@ -100,9 +100,12 @@ vtunnel orbstack                       # interactive picker → choose, name, ex
 vtunnel orbstack list                  # list running containers
 vtunnel orbstack expose dolibarr-v23   # expose a container
 vtunnel orbstack expose dolibarr-v23 app1   # …with your own subdomain
+vtunnel orbstack watch                 # auto-expose containers as they come and go
 ```
 
 The subdomain defaults to the container's custom domain (the `dev.orbstack.domains` label) or its name. Exposing opens the dashboard focused on the new route, where OrbStack-backed tunnels carry a `⬡` badge and a compact OrbStack detail card.
+
+`vtunnel orbstack watch` keeps your routes in sync with running containers: every HTTP container gets a route, and routes are removed when their container stops. It only manages routes it created — manual ones are left untouched.
 
 ### The dashboard
 
