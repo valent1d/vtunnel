@@ -165,6 +165,7 @@ vtunnel can also expose **TCP** services (Postgres, MySQL/MariaDB, SSH, Redis…
 **On the machine that has the service** (and runs the tunnel):
 
 ```bash
+vtunnel tcp                           # open the TCP dashboard (list / new / remove)
 vtunnel tcp 5432 db                   # expose localhost:5432 at db.<domain>
 vtunnel tcp 192.168.1.10:22 ssh       # …or any host:port
 vtunnel orbstack expose doli-db --tcp # an OrbStack container's port (e.g. MariaDB)

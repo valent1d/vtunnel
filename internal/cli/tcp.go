@@ -16,6 +16,7 @@ import (
 	cf "vtunnel/internal/cloudflared"
 	"vtunnel/internal/config"
 	"vtunnel/internal/launchd"
+	"vtunnel/internal/tcpui"
 )
 
 func newTCPCommand(configPath *string) *cobra.Command {
@@ -30,11 +31,17 @@ func newTCPCommand(configPath *string) *cobra.Command {
 			"`vtunnel tcp connect <subdomain>`. Use this to reach your own service from\n" +
 			"another machine, or for a teammate who can install cloudflared — not for\n" +
 			"anonymous browser access.",
-		Args: cobra.ExactArgs(2),
+		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(*configPath)
 			if err != nil {
 				return err
+			}
+			if len(args) == 0 {
+				return tcpui.Run(cmd.Context(), cliTCPManager{cfg: cfg, configPath: *configPath, domain: domain})
+			}
+			if len(args) != 2 {
+				return errors.New("usage: vtunnel tcp <target> <subdomain>")
 			}
 			target, err := normalizeTCPTarget(args[0])
 			if err != nil {
@@ -224,6 +231,63 @@ func normalizeTCPTarget(arg string) (string, error) {
 		return "", fmt.Errorf("target %q must be a port or host:port", arg)
 	}
 	return arg, nil
+}
+
+// cliTCPManager implements tcpui.Manager so the TCP dashboard can list/add/remove
+// tunnels without importing the cloudflared config plumbing.
+type cliTCPManager struct {
+	cfg        config.Config
+	configPath string
+	domain     string
+}
+
+func (m cliTCPManager) List(ctx context.Context) ([]tcpui.Tunnel, error) {
+	rules, err := cf.TCPIngress(cloudflaredConfigPathFor(m.cfg))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tcpui.Tunnel, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, tcpui.Tunnel{
+			Hostname:   rule.Hostname,
+			Target:     strings.TrimPrefix(strings.TrimSpace(rule.Service), "tcp://"),
+			ConnectCmd: "vtunnel tcp connect " + rule.Hostname,
+		})
+	}
+	return out, nil
+}
+
+func (m cliTCPManager) Add(ctx context.Context, target, subdomain string) error {
+	normalized, err := normalizeTCPTarget(target)
+	if err != nil {
+		return err
+	}
+	hostname, err := hostnameForRoute(subdomain, m.domain, m.cfg)
+	if err != nil {
+		return err
+	}
+	plan, err := cf.PlanAddIngress(cloudflaredConfigPathFor(m.cfg), hostname, "tcp://"+normalized)
+	if err != nil {
+		return err
+	}
+	if _, err := cf.WritePlan(plan, time.Now()); err != nil {
+		return err
+	}
+	return reloadCloudflared(ctx, m.cfg, m.configPath)
+}
+
+func (m cliTCPManager) Remove(ctx context.Context, hostname string) error {
+	plan, err := cf.PlanRemoveIngress(cloudflaredConfigPathFor(m.cfg), hostname)
+	if err != nil {
+		return err
+	}
+	if len(plan.Changes) == 0 {
+		return nil
+	}
+	if _, err := cf.WritePlan(plan, time.Now()); err != nil {
+		return err
+	}
+	return reloadCloudflared(ctx, m.cfg, m.configPath)
 }
 
 // portFromService extracts the port from a "tcp://host:port" service string.
