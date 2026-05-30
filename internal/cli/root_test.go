@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -172,6 +173,9 @@ func TestDaemonStopCommand(t *testing.T) {
 }
 
 func TestServiceInstallWritesLaunchAgents(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("vtunnel services are supported on macOS only")
+	}
 	tempDir := t.TempDir()
 	t.Setenv("HOME", tempDir)
 	t.Setenv("XDG_CONFIG_HOME", tempDir)
@@ -221,6 +225,9 @@ func TestServiceInstallWritesLaunchAgents(t *testing.T) {
 }
 
 func TestServiceStatusShowsLaunchAgentState(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("vtunnel services are supported on macOS only")
+	}
 	tempDir := t.TempDir()
 	t.Setenv("HOME", tempDir)
 	t.Setenv("XDG_CONFIG_HOME", tempDir)

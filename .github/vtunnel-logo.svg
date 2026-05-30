@@ -1,10 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="520" height="150" viewBox="0 0 520 150" role="img" aria-label="vtunnel">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="200" viewBox="0 0 760 200" role="img" aria-label="vtunnel">
   <title>vtunnel</title>
-  <rect width="520" height="150" rx="14" fill="#0d1117"/>
-  <g fill="#00ff87" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace" font-size="20" font-weight="700" xml:space="preserve">
-    <text x="30" y="44">  _   __________  ___  ___  ________ </text>
-    <text x="30" y="74"> | | / /_  __/ / / / |/ / |/ / __/ / </text>
-    <text x="30" y="104"> | |/ / / / / /_/ /    /    / _// /__</text>
-    <text x="30" y="134"> |___/ /_/  \____/_/|_/_/|_/___/____/</text>
-  </g>
+  <rect x="3" y="3" width="754" height="194" rx="22" fill="#0d1117" stroke="#21262d" stroke-width="2"/>
+  <circle cx="42" cy="40" r="8" fill="#ff5f56"/>
+  <circle cx="70" cy="40" r="8" fill="#febc2e"/>
+  <circle cx="98" cy="40" r="8" fill="#28c840"/>
+  <text x="42" y="143" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace" font-size="76" font-weight="700" xml:space="preserve"><tspan fill="#00ff87">❯ </tspan><tspan fill="#e6edf3">vtunnel</tspan><tspan fill="#00ff87" opacity="0.9"> █</tspan></text>
 </svg>
