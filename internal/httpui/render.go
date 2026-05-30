@@ -179,7 +179,19 @@ func renderTunnelList(snapshot Snapshot, width int, minRows int) string {
 		name := routeName(route.Hostname)
 		host := route.Hostname
 		line := fmt.Sprintf("%s%s %-12s %s", prefix, marker, name, host)
-		lines = append(lines, style.Render(truncate(line, width-4)))
+		// A trailing 🔒 (rendered after the row style, width reserved) marks
+		// Access-protected routes without disturbing column alignment.
+		avail := width - 4
+		suffix := ""
+		if route.Access != nil {
+			suffix = " " + accessBadge
+			avail -= lipgloss.Width(suffix)
+		}
+		rendered := style.Render(truncate(line, avail))
+		if suffix != "" {
+			rendered += okStyle.Render(suffix)
+		}
+		lines = append(lines, rendered)
 	}
 	return renderBox(fmt.Sprintf("Tunnels (%d)", len(snapshot.Routes)), strings.Join(padRows(lines, minRows), "\n"), width)
 }
@@ -190,6 +202,9 @@ func renderRightPane(snapshot Snapshot, width int, availableRows int) string {
 	chartWidth := max(10, width-2)
 	stats := computeStats(snapshot.Logs, route.CreatedAt, snapshot.Now, chartWidth, time.Second)
 	sections := []string{renderHero(route, stats, snapshot.Edge, width)}
+	if route.Access != nil {
+		sections = append(sections, "", renderAccess(route.Access, width))
+	}
 	if route.Orbstack != nil {
 		sections = append(sections, "", renderOrbStack(route.Orbstack, width))
 	}
@@ -230,8 +245,26 @@ func renderHero(route routes.Route, stats Stats, edge cloudflared.EdgeStatus, wi
 	return renderBox(route.Hostname, body, width)
 }
 
-// orbstackBadge marks OrbStack-backed routes in the tunnel list.
-const orbstackBadge = "⬡"
+// orbstackBadge marks OrbStack-backed routes in the tunnel list; accessBadge
+// marks Access-protected routes.
+const (
+	orbstackBadge = "⬡"
+	accessBadge   = "🔒"
+)
+
+// renderAccess is a compact card for Access-protected routes: the login method,
+// who is allowed, and (for SSO) the identity provider.
+func renderAccess(info *routes.AccessInfo, width int) string {
+	method := info.Mode
+	if info.Mode == "sso" && info.IdP != "" {
+		method = "sso · " + info.IdP
+	}
+	body := commandStyle.Render(accessBadge+" Cloudflare Access") + mutedStyle.Render("  ·  "+method)
+	if len(info.Allow) > 0 {
+		body += "\n" + mutedStyle.Render("allow  ") + strings.Join(info.Allow, ", ")
+	}
+	return renderBox("Protected", body, width)
+}
 
 // renderOrbStack is a compact detail card shown for OrbStack-backed routes:
 // the container, its image, and any custom domains. Kept to two lines so it

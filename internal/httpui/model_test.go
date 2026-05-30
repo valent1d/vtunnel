@@ -68,6 +68,38 @@ func TestRenderShowsOrbStackBadgeAndDetail(t *testing.T) {
 	}
 }
 
+func TestRenderShowsAccessBadgeAndDetail(t *testing.T) {
+	route := routes.Route{
+		Hostname: "doli23.example.test",
+		Target:   "http://127.0.0.1:8080",
+		Access: &routes.AccessInfo{
+			AppID: "app-1",
+			Mode:  "sso",
+			IdP:   "VLTN Connect",
+			Allow: []string{"@progiseize.com"},
+		},
+	}
+	output := ansi.Strip(Render(Snapshot{
+		Routes:        []routes.Route{route},
+		SelectedRoute: route,
+		Width:         110,
+		Height:        40,
+	}))
+	for _, want := range []string{accessBadge, "Protected", "sso · VLTN Connect", "@progiseize.com"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestRenderNoAccessBlockForPublicRoute(t *testing.T) {
+	route := routes.Route{Hostname: "demo.example.test", Target: "http://127.0.0.1:3000"}
+	output := ansi.Strip(Render(Snapshot{Routes: []routes.Route{route}, SelectedRoute: route, Width: 110, Height: 40}))
+	if strings.Contains(output, "Protected") {
+		t.Fatalf("public route should not render a Protected block:\n%s", output)
+	}
+}
+
 func TestRenderNoOrbStackBlockForPlainRoute(t *testing.T) {
 	route := routes.Route{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}
 	output := ansi.Strip(Render(Snapshot{
