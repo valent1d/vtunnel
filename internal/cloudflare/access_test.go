@@ -179,6 +179,60 @@ func TestDeleteAccessAppHitsDelete(t *testing.T) {
 	}
 }
 
+func TestDetectAccessStates(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		want    AccessState
+	}{
+		{
+			name: "ready",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				writeEnvelope(t, w, map[string]any{"auth_domain": "acme.cloudflareaccess.com"})
+			},
+			want: AccessReady,
+		},
+		{
+			name: "org empty -> not set up",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				writeEnvelope(t, w, map[string]any{"auth_domain": ""})
+			},
+			want: AccessNotSetUp,
+		},
+		{
+			name: "forbidden -> token unscoped",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "errors": []map[string]any{{"message": "permission denied"}}})
+			},
+			want: AccessTokenUnscoped,
+		},
+		{
+			name: "server error -> not set up (fail open)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "errors": []map[string]any{{"message": "billing required"}}})
+			},
+			want: AccessNotSetUp,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(tc.handler)
+			defer server.Close()
+			client, _ := New("test-token", WithBaseURL(server.URL))
+			got := DetectAccess(context.Background(), client, "acct")
+			if got.State != tc.want {
+				t.Fatalf("state = %v, want %v (detail %q)", got.State, tc.want, got.Detail)
+			}
+		})
+	}
+
+	if got := DetectAccess(context.Background(), nil, ""); got.State != AccessUnknown {
+		t.Fatalf("empty account id should be AccessUnknown, got %v", got.State)
+	}
+}
+
 func TestAccessMethodsValidateInput(t *testing.T) {
 	client, _ := New("test-token")
 	if _, err := client.ZeroTrustOrg(context.Background(), ""); err == nil {

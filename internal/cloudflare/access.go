@@ -90,6 +90,49 @@ func EveryoneRule() map[string]any {
 	return map[string]any{"everyone": map[string]any{}}
 }
 
+// AccessState is the readiness of Cloudflare Access for an account.
+type AccessState int
+
+const (
+	// AccessUnknown means detection could not run (e.g. no account id).
+	AccessUnknown AccessState = iota
+	// AccessNotSetUp means no Zero Trust organization exists yet — the user
+	// must bootstrap it in the dashboard (cannot be done over the API).
+	AccessNotSetUp
+	// AccessTokenUnscoped means the token cannot even read Access (401/403).
+	AccessTokenUnscoped
+	// AccessReady means a Zero Trust org exists and is readable.
+	AccessReady
+)
+
+// AccessStatus is the detected Access readiness plus context for the UX.
+type AccessStatus struct {
+	State      AccessState
+	AuthDomain string
+	Detail     string
+}
+
+// DetectAccess maps an account to one of the readiness states. It fails open:
+// any non-authorization error (a never-enabled account returns billing/other
+// errors) is treated as "not set up" rather than a hard failure, so the CLI can
+// guide the user to bootstrap Zero Trust.
+func DetectAccess(ctx context.Context, client *Client, accountID string) AccessStatus {
+	if strings.TrimSpace(accountID) == "" {
+		return AccessStatus{State: AccessUnknown, Detail: "no account id"}
+	}
+	org, err := client.ZeroTrustOrg(ctx, accountID)
+	switch {
+	case err == nil && strings.TrimSpace(org.AuthDomain) != "":
+		return AccessStatus{State: AccessReady, AuthDomain: org.AuthDomain}
+	case err == nil:
+		return AccessStatus{State: AccessNotSetUp, Detail: "Zero Trust organization is not configured"}
+	case IsAuthorizationError(err):
+		return AccessStatus{State: AccessTokenUnscoped, Detail: err.Error()}
+	default:
+		return AccessStatus{State: AccessNotSetUp, Detail: err.Error()}
+	}
+}
+
 func accessPath(accountID string, parts ...string) string {
 	path := "/accounts/" + url.PathEscape(strings.TrimSpace(accountID)) + "/access"
 	for _, part := range parts {

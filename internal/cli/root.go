@@ -86,6 +86,7 @@ func NewRootCommand() *cobra.Command {
 		newServiceCommand(&configPath),
 		newDaemonCommand(&configPath),
 		newOrbstackCommand(&configPath),
+		newAccessCommand(&configPath),
 		newUninstallCommand(&configPath),
 	)
 
@@ -255,14 +256,20 @@ func newCloudflareAuthCommand() *cobra.Command {
 	var token string
 	var printURL bool
 	var noOpen bool
+	var accessWrite bool
 
 	cmd := &cobra.Command{
 		Use:   "auth",
 		Short: "Create and store an optional Cloudflare API token",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			templateURL := cloudflareTokenTemplateURL()
+			templateURL := cloudflareTokenTemplateURL(accessWrite)
 			fmt.Fprintln(cmd.OutOrStdout(), "Cloudflare API token helper")
 			fmt.Fprintln(cmd.OutOrStdout(), "This token is optional; vtunnel prefers cloudflared login for tunnel setup.")
+			if accessWrite {
+				fmt.Fprintln(cmd.OutOrStdout(), "Includes Access write (edit) so vtunnel can create Access apps and policies:")
+				fmt.Fprintln(cmd.OutOrStdout(), "  • Access: Apps and Policies — Edit")
+				fmt.Fprintln(cmd.OutOrStdout(), "  • Access: Organizations, Identity Providers, and Groups — Edit")
+			}
 			fmt.Fprintln(cmd.OutOrStdout(), "Template URL:")
 			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", templateURL)
 
@@ -330,6 +337,7 @@ func newCloudflareAuthCommand() *cobra.Command {
 	cmd.Flags().StringVar(&token, "token", "", "Cloudflare API token to store without prompting")
 	cmd.Flags().BoolVar(&printURL, "print-url", false, "print the token template URL and exit")
 	cmd.Flags().BoolVar(&noOpen, "no-open", false, "do not open the browser")
+	cmd.Flags().BoolVar(&accessWrite, "access", false, "also request Access edit, so vtunnel can protect routes with Cloudflare Access")
 	return cmd
 }
 
@@ -456,13 +464,20 @@ func newCloudflareClientWithEnvOptions(token string) (*cfapi.Client, error) {
 	return cfapi.New(token, options...)
 }
 
-func cloudflareTokenTemplateURL() string {
+func cloudflareTokenTemplateURL(includeAccessWrite bool) string {
+	// Access protection (creating apps/policies/IdPs) needs edit on the two
+	// Access groups. We request edit (which implies read) only when asked, to
+	// keep the default token least-privilege.
+	accessType := "read"
+	if includeAccessWrite {
+		accessType = "edit"
+	}
 	permissions := []map[string]string{
 		{"key": "account_settings", "type": "read"},
 		{"key": "zone", "type": "read"},
 		{"key": "dns", "type": "edit"},
-		{"key": "access", "type": "read"},
-		{"key": "access_acct", "type": "read"},
+		{"key": "access", "type": accessType},
+		{"key": "access_acct", "type": accessType},
 		{"key": "cloudflare_one_connectors", "type": "read"},
 	}
 	encodedPermissions, _ := json.Marshal(permissions)
