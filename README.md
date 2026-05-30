@@ -115,6 +115,8 @@ vtunnel http        # no port → open the TUI dashboard
 
 The dashboard lists your active routes and streams incoming requests so you can inspect traffic without leaving the terminal.
 
+Press `enter` on a request to open its detail: full request and response **headers and body** (captured up to 64 KiB each). From there, press `r` to **replay** the request against your local app — handy for iterating on webhooks (Stripe, GitHub, …) without re-triggering the sender.
+
 ### Logs
 
 ```bash
