@@ -126,6 +126,28 @@ vtunnel logs dev --follow # live tail
 vtunnel logs --limit 100  # more history
 ```
 
+## Protect routes with Cloudflare Access
+
+Exposed routes are public by default. [Cloudflare Access](https://www.cloudflare.com/zero-trust/products/access/) (Zero Trust) puts a login page at the **edge** — before traffic reaches your local app — so only the people you allow get in. It's free for up to 50 users.
+
+```bash
+vtunnel cloudflare auth --access     # one-time: grant vtunnel an Access-write token
+vtunnel access status                # Zero Trust state, identity providers, protected routes
+
+vtunnel http 8080 admin --protect --allow you@example.com        # email one-time PIN
+vtunnel http 8080 admin --protect=sso --idp "Authentik" --allow @example.com  # SSO
+vtunnel access protect admin --allow @example.com                # protect an existing route
+vtunnel access unprotect admin                                   # back to public
+```
+
+- **`--protect` / `--protect=otp`** — email one-time PIN (no identity provider needed). `--allow` is required (an email or `@domain`).
+- **`--protect=email`** — locks the route to a single email via one-time PIN (the honest "simple password").
+- **`--protect=sso`** — use an identity provider (`--idp <name>`); Authentik (OIDC) and Google Workspace are supported.
+
+Protection is created **before** the route is published (the hostname is never briefly public), and rolled back if publishing fails. Protected routes show a 🔒 badge in the dashboard. If you must enable Zero Trust first, `vtunnel access status` walks you through the one-time dashboard step.
+
+> First-time Zero Trust activation (choosing a team name and plan) is done once in the Cloudflare dashboard — Cloudflare requires a card even on the free plan, and you are not charged.
+
 ## One-time setup
 
 Most people just run `vtunnel onboarding` and never touch this. If you'd rather drive setup yourself, `vtunnel setup` runs the same diagnostics and applies fixes with explicit flags (it prints a dry-run plan by default).
@@ -217,7 +239,7 @@ vtunnel uninstall --keep-config   # remove services but keep your config + token
 vtunnel uninstall --cloudflare    # also delete the tunnel and wildcard DNS records
 ```
 
-Your Cloudflare account is left untouched by default — pass `--cloudflare` to also delete the tunnel and the wildcard DNS it created. The binary itself is removed separately with `brew uninstall vtunnel`.
+Your Cloudflare account is left untouched by default — pass `--cloudflare` to also delete the tunnel, the wildcard DNS, and any Access apps vtunnel created. The binary itself is removed separately with `brew uninstall vtunnel`. (Stopping a protected route with `vtunnel stop` also removes its Access app.)
 
 ## Configuration
 
