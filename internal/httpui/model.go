@@ -74,6 +74,8 @@ type client interface {
 	AddRoute(context.Context, routes.Route) error
 	DeleteRoute(context.Context, string) error
 	ListLogs(context.Context, requestlog.Filter) ([]requestlog.Entry, error)
+	GetExchange(context.Context, uint64) (requestlog.Exchange, error)
+	ReplayRequest(context.Context, uint64) error
 }
 
 type Model struct {
@@ -103,6 +105,9 @@ type Model struct {
 	quit          bool
 	confirmCancel bool
 	helpExpanded  bool
+
+	detail    *requestlog.Exchange // captured headers/body for the open request detail
+	detailErr string
 }
 
 type mode int
@@ -144,6 +149,17 @@ type stopMsg struct {
 
 type edgeMsg struct {
 	status cloudflared.EdgeStatus
+}
+
+type exchangeMsg struct {
+	id       uint64
+	exchange requestlog.Exchange
+	err      error
+}
+
+type replayMsg struct {
+	id  uint64
+	err error
 }
 
 type tickMsg time.Time
@@ -203,8 +219,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modeConfirmStop:
 			return m.updateConfirmStop(msg)
 		case modeRequestDetail:
-			if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "q" {
+			switch msg.String() {
+			case "esc", "enter", "q":
 				m.mode = modeDashboard
+				m.detail = nil
+				m.detailErr = ""
+			case "r":
+				if m.detail != nil {
+					id := m.detail.ID
+					return m, m.replayRequest(id)
+				}
 			}
 			return m, nil
 		}
@@ -246,6 +270,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logCursor = 0
 		m.logFollow = true
 		return m, m.fetchRoutes()
+	case exchangeMsg:
+		// Ignore a stale fetch if the user already closed/changed the detail.
+		if m.mode != modeRequestDetail {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.detailErr = msg.err.Error()
+			return m, nil
+		}
+		exchange := msg.exchange
+		m.detail = &exchange
+		m.detailErr = ""
+		return m, nil
+	case replayMsg:
+		if msg.err != nil {
+			m.err = "replay failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.notice = fmt.Sprintf("Replayed request #%d", msg.id)
+		m.err = ""
+		return m, m.fetchLogs()
 	case stopMsg:
 		if msg.err != nil {
 			m.err = msg.err.Error()
@@ -327,8 +372,11 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case key.Matches(msg, keys.Open):
-		if m.focus == focusLogs && len(m.logs) > 0 {
+		if entry, ok := m.currentLog(); ok {
 			m.mode = modeRequestDetail
+			m.detail = nil
+			m.detailErr = ""
+			return m, m.fetchExchange(entry.ID)
 		}
 		return m, nil
 	}
@@ -530,6 +578,31 @@ func (m Model) fetchRoutes() tea.Cmd {
 		defer cancel()
 		list, err := m.client.ListRoutes(ctx)
 		return routesMsg{routes: list, err: err}
+	}
+}
+
+// currentLog returns the request log entry under the cursor, if any.
+func (m Model) currentLog() (requestlog.Entry, bool) {
+	if m.focus != focusLogs || len(m.logs) == 0 {
+		return requestlog.Entry{}, false
+	}
+	return m.logs[clamp(m.logCursor, 0, len(m.logs)-1)], true
+}
+
+func (m Model) fetchExchange(id uint64) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		exchange, err := m.client.GetExchange(ctx, id)
+		return exchangeMsg{id: id, exchange: exchange, err: err}
+	}
+}
+
+func (m Model) replayRequest(id uint64) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer cancel()
+		return replayMsg{id: id, err: m.client.ReplayRequest(ctx, id)}
 	}
 }
 

@@ -2,6 +2,8 @@ package httpui
 
 import (
 	"fmt"
+	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +39,8 @@ func (m Model) View() tea.View {
 		ConfirmCancel: m.confirmCancel,
 		HelpExpanded:  m.helpExpanded,
 		Edge:          m.edge,
+		Detail:        m.detail,
+		DetailErr:     m.detailErr,
 		Now:           time.Now(),
 	})}
 }
@@ -61,6 +65,8 @@ type Snapshot struct {
 	HelpExpanded  bool
 	Edge          cloudflared.EdgeStatus
 	Now           time.Time
+	Detail        *requestlog.Exchange
+	DetailErr     string
 }
 
 func Render(snapshot Snapshot) string {
@@ -365,19 +371,77 @@ func renderRequestDetail(snapshot Snapshot, width int) string {
 	if !ok {
 		return renderBox("Request", mutedStyle.Render("No request selected."), width)
 	}
-	body := strings.Join([]string{
+	lines := []string{
 		fmt.Sprintf("Time:      %s", entry.Time.Format(time.RFC3339)),
-		fmt.Sprintf("Host:      %s", entry.Hostname),
 		fmt.Sprintf("Request:   %s %s", entry.Method, entry.Path),
-		fmt.Sprintf("Status:    %d", entry.Status),
-		fmt.Sprintf("Duration:  %s", entry.Duration.Round(time.Millisecond)),
-		fmt.Sprintf("Bytes:     %d", entry.Bytes),
+		fmt.Sprintf("Status:    %d  ·  %s  ·  %d bytes", entry.Status, entry.Duration.Round(time.Millisecond), entry.Bytes),
 		fmt.Sprintf("Target:    %s", entry.Target),
 		fmt.Sprintf("Remote:    %s", entry.RemoteAddr),
-		"",
-		mutedStyle.Render("enter/esc close"),
-	}, "\n")
-	return renderBox("Request detail", body, width)
+	}
+
+	switch {
+	case snapshot.DetailErr != "":
+		lines = append(lines, "", warnStyle.Render(snapshot.DetailErr))
+	case snapshot.Detail == nil:
+		lines = append(lines, "", mutedStyle.Render("Loading headers and body…"))
+	default:
+		ex := snapshot.Detail
+		bodyWidth := max(10, width-4)
+		lines = append(lines, "", brandStyle.Render("Request"))
+		lines = append(lines, renderHeaderBlock(ex.RequestHeaders, bodyWidth)...)
+		lines = append(lines, renderBodyBlock(ex.RequestBody, ex.RequestTruncated, bodyWidth)...)
+		lines = append(lines, "", brandStyle.Render("Response"))
+		lines = append(lines, renderHeaderBlock(ex.ResponseHeaders, bodyWidth)...)
+		lines = append(lines, renderBodyBlock(ex.ResponseBody, ex.ResponseTruncated, bodyWidth)...)
+	}
+
+	lines = append(lines, "", mutedStyle.Render("r replay  ·  enter/esc close"))
+	return renderBox("Request detail", strings.Join(lines, "\n"), width)
+}
+
+// renderHeaderBlock renders up to a handful of headers, sorted, truncated to width.
+func renderHeaderBlock(header http.Header, width int) []string {
+	if len(header) == 0 {
+		return []string{mutedStyle.Render("  (no headers)")}
+	}
+	keys := make([]string, 0, len(header))
+	for key := range header {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	const maxHeaders = 12
+	lines := make([]string, 0, len(keys))
+	for i, key := range keys {
+		if i == maxHeaders {
+			lines = append(lines, mutedStyle.Render(fmt.Sprintf("  … %d more", len(keys)-maxHeaders)))
+			break
+		}
+		line := "  " + mutedStyle.Render(key+": ") + strings.Join(header[key], ", ")
+		lines = append(lines, truncate(line, width))
+	}
+	return lines
+}
+
+// renderBodyBlock shows a capped preview of a captured body.
+func renderBodyBlock(body []byte, truncated bool, width int) []string {
+	if len(body) == 0 {
+		return []string{mutedStyle.Render("  (empty body)")}
+	}
+	const maxLines = 12
+	text := strings.ReplaceAll(string(body), "\r\n", "\n")
+	rows := strings.Split(text, "\n")
+	lines := make([]string, 0, maxLines+1)
+	for i, row := range rows {
+		if i == maxLines {
+			lines = append(lines, mutedStyle.Render("  … body truncated for display"))
+			return lines
+		}
+		lines = append(lines, truncate("  "+row, width))
+	}
+	if truncated {
+		lines = append(lines, mutedStyle.Render("  … body truncated at capture limit"))
+	}
+	return lines
 }
 
 func overlayCentered(lines []string, modal string, width int) []string {

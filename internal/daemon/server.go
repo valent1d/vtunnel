@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,17 +24,26 @@ import (
 )
 
 type Server struct {
-	cfg    config.Config
-	routes *routes.Store
-	logs   *requestlog.Store
-	logger *slog.Logger
+	cfg       config.Config
+	routes    *routes.Store
+	logs      *requestlog.Store
+	exchanges *requestlog.ExchangeStore
+	bodyLimit int
+	logger    *slog.Logger
 }
 
 func New(cfg config.Config, routeStore *routes.Store, logStore *requestlog.Store, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{cfg: cfg, routes: routeStore, logs: logStore, logger: logger}
+	return &Server{
+		cfg:       cfg,
+		routes:    routeStore,
+		logs:      logStore,
+		exchanges: requestlog.NewExchangeStore(requestlog.DefaultMaxExchanges),
+		bodyLimit: requestlog.DefaultBodyCaptureLimit,
+		logger:    logger,
+	}
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -175,11 +185,21 @@ func (s *Server) proxyHandler() http.Handler {
 			return
 		}
 
+		// Capture the request headers and a capped prefix of the body without
+		// buffering the whole upload: the proxy still streams the full body
+		// upstream through the tee.
+		requestHeaders := r.Header.Clone()
+		requestBody := newCappedBuffer(s.bodyLimit)
+		if r.Body != nil {
+			r.Body = &teeReadCloser{reader: io.TeeReader(r.Body, requestBody), closer: r.Body}
+		}
+
 		ctx := context.WithValue(r.Context(), proxyTargetKey{}, &proxyTarget{url: target, hostname: hostname})
-		recorder := newResponseRecorder(w)
+		recorder := newResponseRecorder(w, s.bodyLimit)
 		started := time.Now()
 		proxy.ServeHTTP(recorder, r.WithContext(ctx))
-		s.recordRequest(r, route, recorder, time.Since(started))
+		entry := s.recordRequest(r, route, recorder, time.Since(started))
+		s.recordExchange(entry, route, hostname, requestHeaders, requestBody, recorder)
 	})
 }
 
@@ -190,6 +210,8 @@ func (s *Server) apiHandler(shutdown func()) http.Handler {
 	mux.HandleFunc("POST /routes", s.handleAddRoute)
 	mux.HandleFunc("DELETE /routes/{hostname}", s.handleDeleteRoute)
 	mux.HandleFunc("GET /logs", s.handleListLogs)
+	mux.HandleFunc("GET /logs/{id}", s.handleGetExchange)
+	mux.HandleFunc("POST /logs/{id}/replay", s.handleReplay)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown(shutdown))
 	return localOnly(mux)
 }
@@ -260,6 +282,90 @@ func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
+func (s *Server) handleGetExchange(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id must be a positive integer"})
+		return
+	}
+	if s.exchanges == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "request capture is disabled"})
+		return
+	}
+	exchange, ok := s.exchanges.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "request no longer captured"})
+		return
+	}
+	writeJSON(w, http.StatusOK, exchange)
+}
+
+func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id must be a positive integer"})
+		return
+	}
+	if s.exchanges == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "request capture is disabled"})
+		return
+	}
+	exchange, ok := s.exchanges.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "request no longer captured"})
+		return
+	}
+	if err := s.replay(r.Context(), exchange); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
+}
+
+// replay re-issues a captured request back through the local proxy, so it gets
+// routed to the same upstream and logged/captured as a fresh request.
+func (s *Server) replay(ctx context.Context, exchange requestlog.Exchange) error {
+	req, err := http.NewRequestWithContext(ctx, exchange.Method, "http://"+s.cfg.Proxy.Listen+exchange.Path, bytes.NewReader(exchange.RequestBody))
+	if err != nil {
+		return err
+	}
+	// Route by Host, exactly as the original request was routed.
+	req.Host = exchange.Hostname
+	for key, values := range exchange.RequestHeaders {
+		if skipReplayHeader[http.CanonicalHeaderKey(key)] {
+			continue
+		}
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	return nil
+}
+
+// skipReplayHeader lists headers that must not be copied verbatim on replay:
+// hop-by-hop headers, the Host (set via req.Host), the length (set from the
+// body), and the X-Forwarded-* headers the proxy re-derives.
+var skipReplayHeader = map[string]bool{
+	"Host":              true,
+	"Content-Length":    true,
+	"Connection":        true,
+	"Proxy-Connection":  true,
+	"Keep-Alive":        true,
+	"Transfer-Encoding": true,
+	"Upgrade":           true,
+	"Te":                true,
+	"Trailer":           true,
+	"X-Forwarded-For":   true,
+	"X-Forwarded-Host":  true,
+	"X-Forwarded-Proto": true,
+}
+
 func (s *Server) handleShutdown(shutdown func()) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -270,15 +376,15 @@ func (s *Server) handleShutdown(shutdown func()) http.HandlerFunc {
 	}
 }
 
-func (s *Server) recordRequest(r *http.Request, route routes.Route, recorder *responseRecorder, duration time.Duration) {
+func (s *Server) recordRequest(r *http.Request, route routes.Route, recorder *responseRecorder, duration time.Duration) requestlog.Entry {
 	if s.logs == nil {
-		return
+		return requestlog.Entry{}
 	}
 	path := r.URL.RequestURI()
 	if path == "" {
 		path = r.URL.Path
 	}
-	_, err := s.logs.Add(requestlog.Entry{
+	entry, err := s.logs.Add(requestlog.Entry{
 		Time:       time.Now(),
 		Hostname:   route.Hostname,
 		Method:     r.Method,
@@ -292,6 +398,29 @@ func (s *Server) recordRequest(r *http.Request, route routes.Route, recorder *re
 	if err != nil {
 		s.logger.Warn("record request log failed", "host", route.Hostname, "error", err)
 	}
+	return entry
+}
+
+// recordExchange stores the full captured request/response keyed by the log
+// entry ID, so the dashboard can inspect headers/bodies and replay it.
+func (s *Server) recordExchange(entry requestlog.Entry, route routes.Route, hostname string, requestHeaders http.Header, requestBody *cappedBuffer, recorder *responseRecorder) {
+	if s.exchanges == nil || entry.ID == 0 {
+		return
+	}
+	s.exchanges.Put(requestlog.Exchange{
+		ID:                entry.ID,
+		Hostname:          hostname,
+		Method:            entry.Method,
+		Path:              entry.Path,
+		Target:            route.Target,
+		Status:            recorder.statusCode(),
+		RequestHeaders:    requestHeaders,
+		RequestBody:       requestBody.bytes(),
+		RequestTruncated:  requestBody.truncated,
+		ResponseHeaders:   recorder.capturedHeader(),
+		ResponseBody:      recorder.body.bytes(),
+		ResponseTruncated: recorder.body.truncated,
+	})
 }
 
 func localOnly(next http.Handler) http.Handler {
@@ -350,15 +479,20 @@ type responseRecorder struct {
 	http.ResponseWriter
 	status       int
 	bytesWritten int64
+	header       http.Header // snapshot of response headers at WriteHeader time
+	body         *cappedBuffer
 }
 
-func newResponseRecorder(w http.ResponseWriter) *responseRecorder {
-	return &responseRecorder{ResponseWriter: w}
+func newResponseRecorder(w http.ResponseWriter, bodyLimit int) *responseRecorder {
+	return &responseRecorder{ResponseWriter: w, body: newCappedBuffer(bodyLimit)}
 }
 
 func (r *responseRecorder) WriteHeader(status int) {
 	if r.status == 0 {
 		r.status = status
+	}
+	if r.header == nil {
+		r.header = r.ResponseWriter.Header().Clone()
 	}
 	r.ResponseWriter.WriteHeader(status)
 }
@@ -368,8 +502,20 @@ func (r *responseRecorder) Write(data []byte) (int, error) {
 		r.status = http.StatusOK
 	}
 	n, err := r.ResponseWriter.Write(data)
+	if r.body != nil && n > 0 {
+		_, _ = r.body.Write(data[:n])
+	}
 	r.bytesWritten += int64(n)
 	return n, err
+}
+
+// capturedHeader returns the response headers snapshotted at WriteHeader, or the
+// live header map if the handler never called WriteHeader explicitly.
+func (r *responseRecorder) capturedHeader() http.Header {
+	if r.header != nil {
+		return r.header
+	}
+	return r.ResponseWriter.Header().Clone()
 }
 
 func (r *responseRecorder) Flush() {
@@ -390,12 +536,19 @@ func (r *responseRecorder) ReadFrom(reader io.Reader) (int64, error) {
 	if r.status == 0 {
 		r.status = http.StatusOK
 	}
+	// Tee into the capture buffer so bodies streamed via ReadFrom (the proxy's
+	// fast path) are captured too, not just those written through Write.
+	if r.body != nil {
+		reader = io.TeeReader(reader, r.body)
+	}
 	if readerFrom, ok := r.ResponseWriter.(io.ReaderFrom); ok {
 		n, err := readerFrom.ReadFrom(reader)
 		r.bytesWritten += n
 		return n, err
 	}
-	return io.Copy(r.ResponseWriter, reader)
+	n, err := io.Copy(r.ResponseWriter, reader)
+	r.bytesWritten += n
+	return n, err
 }
 
 func (r *responseRecorder) Unwrap() http.ResponseWriter {
@@ -408,3 +561,51 @@ func (r *responseRecorder) statusCode() int {
 	}
 	return r.status
 }
+
+// cappedBuffer captures up to limit bytes written to it and flags whether more
+// arrived. It is a tee sink: it always reports the full length as consumed so
+// it never disturbs the real request/response stream.
+type cappedBuffer struct {
+	limit     int
+	buf       []byte
+	truncated bool
+}
+
+func newCappedBuffer(limit int) *cappedBuffer {
+	if limit < 0 {
+		limit = 0
+	}
+	return &cappedBuffer{limit: limit}
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if remaining := c.limit - len(c.buf); remaining > 0 {
+		if len(p) <= remaining {
+			c.buf = append(c.buf, p...)
+		} else {
+			c.buf = append(c.buf, p[:remaining]...)
+			c.truncated = true
+		}
+	} else if len(p) > 0 {
+		c.truncated = true
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) bytes() []byte {
+	if len(c.buf) == 0 {
+		return nil
+	}
+	return c.buf
+}
+
+// teeReadCloser reads from reader (a TeeReader over the real body) while closing
+// the original body, so the proxy still streams the full body upstream while a
+// capped prefix is captured.
+type teeReadCloser struct {
+	reader io.Reader
+	closer io.Closer
+}
+
+func (t *teeReadCloser) Read(p []byte) (int, error) { return t.reader.Read(p) }
+func (t *teeReadCloser) Close() error               { return t.closer.Close() }

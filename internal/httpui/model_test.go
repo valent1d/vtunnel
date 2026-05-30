@@ -2,7 +2,9 @@ package httpui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +169,65 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 	}
 }
 
+func TestModelFetchesExchangeDetailAndReplays(t *testing.T) {
+	cfg := config.Default()
+	client := &fakeClient{
+		routes: []routes.Route{{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}},
+		logs:   []requestlog.Entry{{ID: 7, Hostname: "web.example.test", Method: "POST", Status: 200, Path: "/submit"}},
+		exchanges: map[uint64]requestlog.Exchange{
+			7: {
+				ID: 7, Method: "POST", Path: "/submit", Status: 200,
+				RequestHeaders:  http.Header{"X-Custom": {"abc"}},
+				RequestBody:     []byte("ping"),
+				ResponseHeaders: http.Header{"X-Upstream": {"yes"}},
+				ResponseBody:    []byte("pong"),
+			},
+		},
+	}
+	model := NewModel(client, cfg, "web.example.test")
+	model.routes = client.routes
+	model.syncSelection()
+	model.logs = client.logs
+	model.focus = focusLogs
+
+	// Enter opens the detail and asks for the captured exchange.
+	updated, cmd := model.Update(press("enter"))
+	model = updated.(Model)
+	if model.mode != modeRequestDetail {
+		t.Fatalf("mode = %v, want request detail", model.mode)
+	}
+	if cmd == nil {
+		t.Fatal("expected an exchange fetch command")
+	}
+	updated, _ = model.Update(cmd()) // exchangeMsg
+	model = updated.(Model)
+	if model.detail == nil || model.detail.ID != 7 {
+		t.Fatalf("detail = %+v", model.detail)
+	}
+
+	out := ansi.Strip(model.View().Content)
+	for _, want := range []string{"X-Custom", "ping", "X-Upstream", "pong", "r replay"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("detail view missing %q:\n%s", want, out)
+		}
+	}
+
+	// r replays the captured request.
+	updated, cmd = model.Update(press("r"))
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected a replay command")
+	}
+	updated, _ = model.Update(cmd()) // replayMsg
+	model = updated.(Model)
+	if client.replayedID != 7 {
+		t.Fatalf("replayedID = %d, want 7", client.replayedID)
+	}
+	if !strings.Contains(model.notice, "Replayed request #7") {
+		t.Fatalf("notice = %q", model.notice)
+	}
+}
+
 func TestLogScrollMovesPastVisibleWindow(t *testing.T) {
 	cfg := config.Default()
 	client := &fakeClient{routes: []routes.Route{{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}}}
@@ -209,8 +270,10 @@ func press(value string) tea.KeyPressMsg {
 }
 
 type fakeClient struct {
-	routes []routes.Route
-	logs   []requestlog.Entry
+	routes     []routes.Route
+	logs       []requestlog.Entry
+	exchanges  map[uint64]requestlog.Exchange
+	replayedID uint64
 }
 
 func (client *fakeClient) ListRoutes(context.Context) ([]routes.Route, error) {
@@ -235,4 +298,16 @@ func (client *fakeClient) DeleteRoute(_ context.Context, hostname string) error 
 
 func (client *fakeClient) ListLogs(context.Context, requestlog.Filter) ([]requestlog.Entry, error) {
 	return client.logs, nil
+}
+
+func (client *fakeClient) GetExchange(_ context.Context, id uint64) (requestlog.Exchange, error) {
+	if exchange, ok := client.exchanges[id]; ok {
+		return exchange, nil
+	}
+	return requestlog.Exchange{}, errors.New("not captured")
+}
+
+func (client *fakeClient) ReplayRequest(_ context.Context, id uint64) error {
+	client.replayedID = id
+	return nil
 }

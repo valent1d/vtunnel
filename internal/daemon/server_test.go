@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,6 +125,93 @@ func TestServerRoutesProxyRequestsByHost(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not stop")
+	}
+}
+
+func TestServerCapturesAndReplaysRequest(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != "ping" {
+			t.Errorf("upstream body = %q, want ping", body)
+		}
+		w.Header().Set("X-Upstream", "yes")
+		_, _ = io.WriteString(w, "pong")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Proxy.Listen = freeLoopbackAddr(t)
+	cfg.API.Listen = freeLoopbackAddr(t)
+
+	store, err := routes.NewStore(filepath.Join(t.TempDir(), "routes.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logStore, err := requestlog.NewStore(filepath.Join(t.TempDir(), "requests.jsonl"), requestlog.DefaultMaxEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	go func() { _ = New(cfg, store, logStore, logger).Run(ctx) }()
+
+	client := api.New(cfg)
+	waitForHealth(t, client)
+	if err := client.AddRoute(ctx, routes.Route{Hostname: "dev.example.test", Target: upstream.URL}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Send a request with a body through the proxy.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+cfg.Proxy.Listen+"/submit", strings.NewReader("ping"))
+	req.Host = "dev.example.test"
+	req.Header.Set("X-Custom", "abc")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	logs, err := client.ListLogs(ctx, requestlog.Filter{Hostname: "dev.example.test"})
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("logs = %v, err = %v", logs, err)
+	}
+	id := logs[0].ID
+
+	// The captured exchange has request headers/body and response body.
+	exchange, err := client.GetExchange(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exchange.Method != http.MethodPost || exchange.Path != "/submit" {
+		t.Fatalf("exchange method/path = %s %s", exchange.Method, exchange.Path)
+	}
+	if string(exchange.RequestBody) != "ping" {
+		t.Fatalf("captured request body = %q", exchange.RequestBody)
+	}
+	if exchange.RequestHeaders.Get("X-Custom") != "abc" {
+		t.Fatalf("captured request header missing: %v", exchange.RequestHeaders)
+	}
+	if string(exchange.ResponseBody) != "pong" {
+		t.Fatalf("captured response body = %q", exchange.ResponseBody)
+	}
+	if exchange.ResponseHeaders.Get("X-Upstream") != "yes" {
+		t.Fatalf("captured response header missing: %v", exchange.ResponseHeaders)
+	}
+
+	// Replay re-hits the upstream with the captured body.
+	if err := client.ReplayRequest(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&hits) < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&hits); got < 2 {
+		t.Fatalf("upstream hits = %d, want >= 2 after replay", got)
 	}
 }
 

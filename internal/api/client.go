@@ -77,6 +77,16 @@ func (c *Client) ListLogs(ctx context.Context, filter requestlog.Filter) ([]requ
 	return entries, err
 }
 
+func (c *Client) GetExchange(ctx context.Context, id uint64) (requestlog.Exchange, error) {
+	var exchange requestlog.Exchange
+	err := c.do(ctx, http.MethodGet, fmt.Sprintf("/logs/%d", id), nil, &exchange)
+	return exchange, err
+}
+
+func (c *Client) ReplayRequest(ctx context.Context, id uint64) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/logs/%d/replay", id), nil, nil)
+}
+
 func (c *Client) Shutdown(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/shutdown", nil, nil)
 }
