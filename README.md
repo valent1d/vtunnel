@@ -189,6 +189,7 @@ psql -h 127.0.0.1 -p 5432 …           # then point your client at the local po
 For SSH specifically there's a better option than a TCP tunnel: **`vtunnel ssh`** renders a full SSH terminal **in the browser**. Visitors open a URL, sign in through a Cloudflare Access login, and get a terminal — **no SSH client and no `cloudflared`** on their side. Cloudflare renders the session at its edge.
 
 ```bash
+vtunnel ssh                                       # open the browser-SSH dashboard (list / new / remove)
 vtunnel ssh box --allow you@example.com           # localhost:22 → https://box.<domain>
 vtunnel ssh box --allow @example.com --target 192.168.1.10:22
 vtunnel ssh box --allow you@example.com --idp Authentik   # SSO instead of email OTP

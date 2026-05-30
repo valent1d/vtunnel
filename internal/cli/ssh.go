@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	cfapi "vtunnel/internal/cloudflare"
 	cf "vtunnel/internal/cloudflared"
 	"vtunnel/internal/config"
+	"vtunnel/internal/sshui"
 )
 
 func newSSHCommand(configPath *string) *cobra.Command {
@@ -19,17 +21,21 @@ func newSSHCommand(configPath *string) *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
-		Use:   "ssh <subdomain>",
+		Use:   "ssh [subdomain]",
 		Short: "Expose SSH in the browser (zero-install) via Cloudflare Access",
 		Long: "Create a browser-rendered SSH terminal at <subdomain>.<domain>. Visitors\n" +
 			"open the URL and get an SSH terminal in their browser — no client and no\n" +
 			"cloudflared needed (Cloudflare renders it at the edge after Access login).\n" +
-			"Requires Zero Trust. Each user's email prefix must match their SSH username.",
-		Args: cobra.ExactArgs(1),
+			"Requires Zero Trust. Each user's email prefix must match their SSH username.\n\n" +
+			"Run with no arguments to open the browser-SSH dashboard.",
+		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(*configPath)
 			if err != nil {
 				return err
+			}
+			if len(args) == 0 {
+				return sshui.Run(cmd.Context(), cliSSHManager{cfg: cfg, configPath: *configPath, domain: domain})
 			}
 			hostname, err := hostnameForRoute(args[0], domain, cfg)
 			if err != nil {
@@ -65,16 +71,16 @@ func sshMode(idp string) string {
 	return "otp"
 }
 
-// createBrowserSSH provisions a browser-rendered SSH endpoint: an Access app of
-// type "ssh" + an Allow policy (gating the login), then an ssh:// ingress rule,
-// then restarts cloudflared. The Access app is rolled back if the policy fails.
-func createBrowserSSH(cmd *cobra.Command, cfg config.Config, configPath, hostname, target string, opts protectOptions) error {
-	out := cmd.OutOrStdout()
-	client, accountID, err := accessClient(cmd.Context())
+// provisionBrowserSSH creates a browser-rendered SSH endpoint: an Access app of
+// type "ssh" + an Allow policy (gating the login), then an ssh:// ingress rule.
+// The Access app is rolled back if the policy fails. It does NOT restart
+// cloudflared — callers reload so each can choose how to report a reload error.
+func provisionBrowserSSH(ctx context.Context, cfg config.Config, configPath, hostname, target string, opts protectOptions) error {
+	client, accountID, err := accessClient(ctx)
 	if err != nil {
 		return err
 	}
-	if status := cfapi.DetectAccess(cmd.Context(), client, accountID); status.State != cfapi.AccessReady {
+	if status := cfapi.DetectAccess(ctx, client, accountID); status.State != cfapi.AccessReady {
 		if status.State == cfapi.AccessTokenUnscoped {
 			return errAccessWriteScope
 		}
@@ -85,7 +91,7 @@ func createBrowserSSH(cmd *cobra.Command, cfg config.Config, configPath, hostnam
 	if err != nil {
 		return err
 	}
-	idpID, err := resolveProtectIdP(cmd.Context(), client, accountID, opts.Mode, opts.IdP)
+	idpID, err := resolveProtectIdP(ctx, client, accountID, opts.Mode, opts.IdP)
 	if err != nil {
 		if cfapi.IsAuthorizationError(err) {
 			return errAccessWriteScope
@@ -94,14 +100,14 @@ func createBrowserSSH(cmd *cobra.Command, cfg config.Config, configPath, hostnam
 	}
 
 	name := accessAppName(hostname)
-	if apps, listErr := client.ListAccessApps(cmd.Context(), accountID); listErr == nil {
+	if apps, listErr := client.ListAccessApps(ctx, accountID); listErr == nil {
 		for _, app := range apps {
 			if app.Name == name {
-				_ = client.DeleteAccessApp(cmd.Context(), accountID, app.ID)
+				_ = client.DeleteAccessApp(ctx, accountID, app.ID)
 			}
 		}
 	}
-	app, err := client.CreateAccessApp(cmd.Context(), accountID, cfapi.AccessApp{
+	app, err := client.CreateAccessApp(ctx, accountID, cfapi.AccessApp{
 		Name:                   name,
 		Type:                   "ssh",
 		Destinations:           []cfapi.AccessDestination{{Type: "public", URI: hostname}},
@@ -116,8 +122,8 @@ func createBrowserSSH(cmd *cobra.Command, cfg config.Config, configPath, hostnam
 		}
 		return err
 	}
-	if _, err := client.CreateAccessPolicy(cmd.Context(), accountID, app.ID, cfapi.AccessPolicy{Name: name, Decision: "allow", Include: rules}); err != nil {
-		_ = client.DeleteAccessApp(cmd.Context(), accountID, app.ID)
+	if _, err := client.CreateAccessPolicy(ctx, accountID, app.ID, cfapi.AccessPolicy{Name: name, Decision: "allow", Include: rules}); err != nil {
+		_ = client.DeleteAccessApp(ctx, accountID, app.ID)
 		return err
 	}
 
@@ -125,7 +131,15 @@ func createBrowserSSH(cmd *cobra.Command, cfg config.Config, configPath, hostnam
 	if err != nil {
 		return err
 	}
-	if _, err := cf.WritePlan(plan, time.Now()); err != nil {
+	_, err = cf.WritePlan(plan, time.Now())
+	return err
+}
+
+// createBrowserSSH is the CLI front-end: provision, then restart cloudflared
+// (warning rather than failing on a reload error), then print the URL.
+func createBrowserSSH(cmd *cobra.Command, cfg config.Config, configPath, hostname, target string, opts protectOptions) error {
+	out := cmd.OutOrStdout()
+	if err := provisionBrowserSSH(cmd.Context(), cfg, configPath, hostname, target, opts); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "+ ingress %s → ssh://%s\n", hostname, target)
@@ -136,6 +150,33 @@ func createBrowserSSH(cmd *cobra.Command, cfg config.Config, configPath, hostnam
 	fmt.Fprintf(out, "🔒 Browser SSH ready: https://%s\n", hostname)
 	fmt.Fprintln(out, "  Open it in any browser — no client needed. The email prefix must match the SSH username.")
 	return nil
+}
+
+// removeBrowserSSH deletes the Access app (best effort) and the ssh:// ingress
+// for hostname. It does NOT reload cloudflared. Returns false when there was no
+// SSH ingress to remove.
+func removeBrowserSSH(ctx context.Context, cfg config.Config, hostname string) (bool, error) {
+	if client, accountID, accErr := accessClient(ctx); accErr == nil {
+		name := accessAppName(hostname)
+		if apps, listErr := client.ListAccessApps(ctx, accountID); listErr == nil {
+			for _, app := range apps {
+				if app.Name == name {
+					_ = client.DeleteAccessApp(ctx, accountID, app.ID)
+				}
+			}
+		}
+	}
+	plan, err := cf.PlanRemoveIngress(cloudflaredConfigPathFor(cfg), hostname)
+	if err != nil {
+		return false, err
+	}
+	if len(plan.Changes) == 0 {
+		return false, nil
+	}
+	if _, err := cf.WritePlan(plan, time.Now()); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // maybeSuggestSSH offers browser SSH when the user exposes port 22 over plain
@@ -210,27 +251,13 @@ func newSSHRemoveCommand(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Delete the Access app (best effort) then the ingress, then reload.
-			if client, accountID, accErr := accessClient(cmd.Context()); accErr == nil {
-				name := accessAppName(hostname)
-				if apps, listErr := client.ListAccessApps(cmd.Context(), accountID); listErr == nil {
-					for _, app := range apps {
-						if app.Name == name {
-							_ = client.DeleteAccessApp(cmd.Context(), accountID, app.ID)
-						}
-					}
-				}
-			}
-			plan, err := cf.PlanRemoveIngress(cloudflaredConfigPathFor(cfg), hostname)
+			removed, err := removeBrowserSSH(cmd.Context(), cfg, hostname)
 			if err != nil {
 				return err
 			}
-			if len(plan.Changes) == 0 {
+			if !removed {
 				fmt.Fprintf(cmd.OutOrStdout(), "No SSH endpoint for %s.\n", hostname)
 				return nil
-			}
-			if _, err := cf.WritePlan(plan, time.Now()); err != nil {
-				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "↻ restarting cloudflared…")
 			if err := reloadCloudflared(cmd.Context(), cfg, *configPath); err != nil {
@@ -240,4 +267,53 @@ func newSSHRemoveCommand(configPath *string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// cliSSHManager implements sshui.Manager so the browser-SSH dashboard can
+// list/add/remove endpoints without importing the Cloudflare client plumbing.
+type cliSSHManager struct {
+	cfg        config.Config
+	configPath string
+	domain     string
+}
+
+func (m cliSSHManager) List(ctx context.Context) ([]sshui.Endpoint, error) {
+	loaded, err := cf.Load(cloudflaredConfigPathFor(m.cfg))
+	if err != nil {
+		return nil, err
+	}
+	var out []sshui.Endpoint
+	for _, rule := range loaded.Ingress {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rule.Service)), "ssh://") {
+			out = append(out, sshui.Endpoint{
+				Hostname: rule.Hostname,
+				Target:   strings.TrimPrefix(strings.TrimSpace(rule.Service), "ssh://"),
+				URL:      "https://" + rule.Hostname,
+			})
+		}
+	}
+	return out, nil
+}
+
+func (m cliSSHManager) Add(ctx context.Context, subdomain, target, allow, idp string) error {
+	hostname, err := hostnameForRoute(subdomain, m.domain, m.cfg)
+	if err != nil {
+		return err
+	}
+	var allowList []string
+	if a := strings.TrimSpace(allow); a != "" {
+		allowList = []string{a}
+	}
+	if err := provisionBrowserSSH(ctx, m.cfg, m.configPath, hostname, sshTarget(target), protectOptions{Mode: sshMode(idp), Allow: allowList, IdP: strings.TrimSpace(idp)}); err != nil {
+		return err
+	}
+	return reloadCloudflared(ctx, m.cfg, m.configPath)
+}
+
+func (m cliSSHManager) Remove(ctx context.Context, hostname string) error {
+	removed, err := removeBrowserSSH(ctx, m.cfg, hostname)
+	if err != nil || !removed {
+		return err
+	}
+	return reloadCloudflared(ctx, m.cfg, m.configPath)
 }
