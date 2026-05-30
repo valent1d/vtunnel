@@ -156,6 +156,33 @@ Protection is created **before** the route is published (the hostname is never b
 
 > First-time Zero Trust activation (choosing a team name and plan) is done once in the Cloudflare dashboard — Cloudflare requires a card even on the free plan, and you are not charged.
 
+## TCP tunnels (databases, SSH, …)
+
+vtunnel can also expose **TCP** services (Postgres, MySQL/MariaDB, SSH, Redis…) through the same Cloudflare Tunnel.
+
+> **Important — TCP is not zero-install like HTTP.** A browser speaks HTTP, so HTTP routes work for anyone with the link. A database/SSH client speaks a raw protocol, and Cloudflare's edge only serves HTTP on its web ports — there is **no public `db.example.com:5432` to dial** on the free plan. So the **connecting machine** must wrap the raw TCP into the tunnel with `cloudflared` (that's what `vtunnel tcp connect` does). Use TCP tunnels to reach your own service from another of your machines, or to give a teammate who can install `cloudflared` access — not for anonymous, install-free access.
+
+**On the machine that has the service** (and runs the tunnel):
+
+```bash
+vtunnel tcp 5432 db                   # expose localhost:5432 at db.<domain>
+vtunnel tcp 192.168.1.10:22 ssh       # …or any host:port
+vtunnel orbstack expose doli-db --tcp # an OrbStack container's port (e.g. MariaDB)
+vtunnel tcp list                      # list TCP tunnels
+vtunnel tcp rm db                     # remove one
+```
+
+Adding or removing a TCP tunnel **restarts cloudflared** to apply the change, which briefly reconnects all tunnels (HTTP included).
+
+**On the machine that wants to connect** (needs `cloudflared` installed):
+
+```bash
+vtunnel tcp connect db --port 5432    # opens 127.0.0.1:5432, keep it running
+psql -h 127.0.0.1 -p 5432 …           # then point your client at the local port
+```
+
+(`vtunnel tcp connect` wraps `cloudflared access tcp`; `--port` defaults to the service's port.)
+
 ## One-time setup
 
 Most people just run `vtunnel onboarding` and never touch this. If you'd rather drive setup yourself, `vtunnel setup` runs the same diagnostics and applies fixes with explicit flags (it prints a dry-run plan by default).

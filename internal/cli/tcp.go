@@ -24,9 +24,12 @@ func newTCPCommand(configPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tcp <target> <subdomain>",
 		Short: "Expose a local or remote TCP service (database, SSH, …) over the tunnel",
-		Long: "Expose a TCP service through Cloudflare Tunnel by adding a `tcp://` ingress\n" +
-			"rule for <subdomain>.<domain>. TCP tunnels are reached with\n" +
-			"`vtunnel tcp connect <subdomain>` (or `cloudflared access tcp`), not a browser.",
+		Long: "Expose a TCP service (Postgres, MySQL, SSH, …) through Cloudflare Tunnel.\n\n" +
+			"Unlike HTTP, TCP is NOT zero-install: there is no public db.<domain>:port to\n" +
+			"dial on the free plan. The machine that connects must run cloudflared via\n" +
+			"`vtunnel tcp connect <subdomain>`. Use this to reach your own service from\n" +
+			"another machine, or for a teammate who can install cloudflared — not for\n" +
+			"anonymous browser access.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(*configPath)
@@ -115,9 +118,10 @@ func newTCPConnectCommand(configPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "connect <subdomain>",
 		Short: "Open a local port that tunnels to a TCP service (client side)",
-		Long: "Run `cloudflared access tcp` to expose the remote TCP service on a local\n" +
-			"port. Keep it running and point your client (db client, ssh, …) at the\n" +
-			"local address. This is for the machine that wants to CONNECT.",
+		Long: "Run on the machine that wants to CONNECT (needs cloudflared installed).\n" +
+			"It opens a local port that tunnels to the remote TCP service via\n" +
+			"`cloudflared access tcp` — keep it running and point your client\n" +
+			"(psql, mysql, ssh, …) at 127.0.0.1:<port>.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(*configPath)
@@ -168,7 +172,8 @@ func applyTCPExpose(cmd *cobra.Command, cfg config.Config, configPath, hostname,
 		fmt.Fprintf(out, "⚠ could not restart cloudflared automatically (%v); restart it to apply.\n", err)
 	}
 	fmt.Fprintf(out, "✓ %s exposed over TCP\n", hostname)
-	fmt.Fprintf(out, "  Connect from a client:  vtunnel tcp connect %s\n", hostname)
+	fmt.Fprintln(out, "  Not browser-reachable — the connecting machine needs cloudflared:")
+	fmt.Fprintf(out, "    vtunnel tcp connect %s\n", hostname)
 	return nil
 }
 
