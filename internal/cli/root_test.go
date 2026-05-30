@@ -316,6 +316,114 @@ func TestRootCommandPrintsWelcome(t *testing.T) {
 	}
 }
 
+func TestRootCommandShowsOnboardingBannerWhenUnconfigured(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "config.yml")
+	out, err := executeCommand(context.Background(), "--config", missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "one step left") {
+		t.Fatalf("expected onboarding banner, got %q", out)
+	}
+}
+
+func TestRootCommandHidesOnboardingBannerWhenConfigured(t *testing.T) {
+	existing := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(existing, []byte("proxy:\n  listen: 127.0.0.1:8787\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := executeCommand(context.Background(), "--config", existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "one step left") {
+		t.Fatalf("did not expect onboarding banner, got %q", out)
+	}
+}
+
+// isolateUninstallEnv points config/home at a temp dir and stubs the Keychain so
+// uninstall tests never touch the real machine.
+func isolateUninstallEnv(t *testing.T) {
+	t.Helper()
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+
+	previousRead := readCloudflareTokenFromKeychain
+	previousDelete := deleteCloudflareTokenFromKeychain
+	previousRunner := launchdRunner
+	readCloudflareTokenFromKeychain = func() (string, error) { return "", secrets.ErrNotFound }
+	deleteCloudflareTokenFromKeychain = func() error { return nil }
+	launchdRunner = func(context.Context, string, ...string) ([]byte, error) {
+		return nil, errors.New("not loaded")
+	}
+	t.Cleanup(func() {
+		readCloudflareTokenFromKeychain = previousRead
+		deleteCloudflareTokenFromKeychain = previousDelete
+		launchdRunner = previousRunner
+	})
+}
+
+func TestUninstallDryRunKeepsCloudflareAndChangesNothing(t *testing.T) {
+	isolateUninstallEnv(t)
+
+	out, err := executeCommand(context.Background(), "uninstall", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"vtunnel uninstall will remove:",
+		"macOS LaunchAgents",
+		"Cloudflare account resources: kept (pass --cloudflare",
+		"Dry run — nothing was removed.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("uninstall --dry-run output = %q, want %q", out, want)
+		}
+	}
+}
+
+func TestUninstallKeepConfigShownInPlan(t *testing.T) {
+	isolateUninstallEnv(t)
+
+	out, err := executeCommand(context.Background(), "uninstall", "--dry-run", "--keep-config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Local data: kept (--keep-config)") {
+		t.Fatalf("expected kept local data, got %q", out)
+	}
+}
+
+func TestUninstallCloudflareFlagShowsSection(t *testing.T) {
+	isolateUninstallEnv(t)
+
+	out, err := executeCommand(context.Background(), "uninstall", "--dry-run", "--cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Cloudflare account resources") || strings.Contains(out, "kept (pass --cloudflare") {
+		t.Fatalf("expected Cloudflare section to be active, got %q", out)
+	}
+	if !strings.Contains(out, "cloudflared config not found") {
+		t.Fatalf("expected cloudflared config note, got %q", out)
+	}
+}
+
+func TestUninstallExecutesWithNothingToRemove(t *testing.T) {
+	isolateUninstallEnv(t)
+
+	out, err := executeCommand(context.Background(), "uninstall", "--yes", "--keep-config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Nothing to remove.", "brew uninstall vtunnel"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("uninstall output = %q, want %q", out, want)
+		}
+	}
+}
+
 func TestHTTPCommandStartsCloudflaredWhenStopped(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tempDir)

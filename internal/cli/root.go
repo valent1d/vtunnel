@@ -36,6 +36,7 @@ import (
 	"vtunnel/internal/requestlog"
 	"vtunnel/internal/routes"
 	"vtunnel/internal/secrets"
+	"vtunnel/internal/uninstall"
 )
 
 var (
@@ -62,6 +63,10 @@ func NewRootCommand() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			printWelcome(cmd.OutOrStdout())
+			if !onboardingComplete(configPath) {
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), onboardingBanner())
+			}
 			return nil
 		},
 	}
@@ -80,6 +85,8 @@ func NewRootCommand() *cobra.Command {
 		newCloudflaredCommand(),
 		newServiceCommand(&configPath),
 		newDaemonCommand(&configPath),
+		newOrbstackCommand(&configPath),
+		newUninstallCommand(&configPath),
 	)
 
 	applyBrandedHelpTemplate(root)
@@ -154,6 +161,59 @@ var (
 	brandStyleCLI   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("48"))
 	cliColorProfile = colorprofile.Detect(os.Stdout, os.Environ())
 )
+
+// onboardingComplete reports whether the user has already run the setup wizard,
+// detected by the presence of the vtunnel config file. It mirrors the path
+// resolution in internal/config so the first-run banner disappears for good
+// once onboarding has written a config.
+func onboardingComplete(configPath string) bool {
+	path := strings.TrimSpace(configPath)
+	if path == "" {
+		resolved, err := config.ConfigPath()
+		if err != nil {
+			return false
+		}
+		path = resolved
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// onboardingBanner renders a prominent, boxed call to action pointing first-run
+// users at the setup wizard. Color is gated on the detected profile, matching
+// brandWelcome, so piped/NO_COLOR output stays plain.
+func onboardingBanner() string {
+	box := renderBox([]string{
+		"Welcome to vtunnel — one step left!",
+		"",
+		"Run the guided setup:",
+		"    vtunnel onboarding",
+	})
+	if cliColorProfile < colorprofile.ANSI {
+		return box
+	}
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("48")).Render(box)
+}
+
+// renderBox draws a rounded Unicode box around the given lines, padded to the
+// widest line. lipgloss.Width is used for measurement so wide runes align.
+func renderBox(lines []string) string {
+	width := 0
+	for _, line := range lines {
+		if w := lipgloss.Width(line); w > width {
+			width = w
+		}
+	}
+	rule := strings.Repeat("─", width+2)
+	var b strings.Builder
+	b.WriteString("╭" + rule + "╮\n")
+	for _, line := range lines {
+		pad := strings.Repeat(" ", width-lipgloss.Width(line))
+		b.WriteString("│ " + line + pad + " │\n")
+	}
+	b.WriteString("╰" + rule + "╯")
+	return b.String()
+}
 
 func newCloudflareCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -370,6 +430,10 @@ var writeCloudflareTokenToKeychain = func(token string) error {
 	return secrets.DefaultStore().Set(secrets.CloudflareToken, token)
 }
 
+var deleteCloudflareTokenFromKeychain = func() error {
+	return secrets.DefaultStore().Delete(secrets.CloudflareToken)
+}
+
 var inspectCloudflaredForCLI = inspectCloudflared
 
 var inspectCloudflaredProcessForCLI = inspectCloudflaredProcess
@@ -418,11 +482,17 @@ func openURL(rawURL string) error {
 func newHTTPCommand(configPath *string) *cobra.Command {
 	var domain string
 	var detach bool
+	var target string
 
 	cmd := &cobra.Command{
-		Use:   "http [port] [subdomain]",
-		Short: "Open the HTTP tunnel dashboard or expose a local HTTP service",
-		Args:  cobra.RangeArgs(0, 2),
+		Use:   "http [port|target] [subdomain]",
+		Short: "Open the HTTP tunnel dashboard or expose a local or remote HTTP service",
+		Long: "Open the HTTP tunnel dashboard, or expose an HTTP service.\n\n" +
+			"With no arguments, opens the dashboard. Given a port, forwards a local\n" +
+			"service (http://127.0.0.1:<port>). The first argument may also be a full\n" +
+			"URL or host:port (e.g. http://web.orb.local) to forward to any HTTP\n" +
+			"upstream — see also `vtunnel orbstack` for OrbStack containers.",
+		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(*configPath)
 			if err != nil {
@@ -431,22 +501,31 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 			if err := config.EnsureDirs(); err != nil {
 				return err
 			}
-			if len(args) == 0 {
+
+			useTarget := strings.TrimSpace(target) != ""
+			if len(args) == 0 && !useTarget {
 				if err := ensureDaemon(cmd.Context(), cfg, *configPath); err != nil {
 					return err
 				}
 				return runHTTPUI(cmd.Context(), cfg, "")
 			}
 
-			port, err := normalizePort(args[0])
+			var routeTarget, subdomain string
+			if useTarget {
+				routeTarget, err = normalizeTargetURL(target)
+				if len(args) >= 1 {
+					subdomain = args[0]
+				}
+			} else {
+				routeTarget, err = resolveHTTPTarget(args[0])
+				if len(args) == 2 {
+					subdomain = args[1]
+				}
+			}
 			if err != nil {
 				return err
 			}
 
-			subdomain := ""
-			if len(args) == 2 {
-				subdomain = args[1]
-			}
 			hostname, err := hostnameForRoute(subdomain, domain, cfg)
 			if err != nil {
 				return err
@@ -464,7 +543,7 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 
 			route := routes.Route{
 				Hostname: hostname,
-				Target:   localHTTPPortTarget(port),
+				Target:   routeTarget,
 			}
 			if err := client.AddRoute(cmd.Context(), route); err != nil {
 				return err
@@ -479,7 +558,46 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&domain, "domain", "", "domain to use for this route")
 	cmd.Flags().BoolVar(&detach, "detach", false, "create the route and return instead of following request logs")
+	cmd.Flags().StringVar(&target, "target", "", "upstream URL or host:port to forward to (instead of a local port)")
 	return cmd
+}
+
+// resolveHTTPTarget turns the first positional argument of `vtunnel http` into a
+// proxy target: a bare port becomes http://127.0.0.1:<port>, anything else is
+// treated as a URL or host:port.
+func resolveHTTPTarget(arg string) (string, error) {
+	arg = strings.TrimSpace(arg)
+	if _, err := strconv.Atoi(arg); err == nil {
+		port, perr := normalizePort(arg)
+		if perr != nil {
+			return "", perr
+		}
+		return localHTTPPortTarget(port), nil
+	}
+	return normalizeTargetURL(arg)
+}
+
+// normalizeTargetURL validates an upstream target and defaults the scheme to
+// http:// when omitted (so "web.orb.local" and "web.orb.local:8080" both work).
+func normalizeTargetURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("target is required")
+	}
+	if !strings.Contains(value, "://") {
+		value = "http://" + value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid target %q: %w", value, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("target must use http or https, got %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("invalid target %q: missing host", value)
+	}
+	return parsed.String(), nil
 }
 
 func newListCommand(configPath *string) *cobra.Command {
@@ -893,6 +1011,357 @@ func newServiceUninstallCommand(configPath *string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// uninstallRuntime holds the live handles BuildPlan resolved so the action
+// hooks reuse them instead of re-inspecting.
+type uninstallRuntime struct {
+	cfg      config.Config
+	manager  launchd.Manager
+	specs    []launchd.Spec
+	cfClient *cfapi.Client
+}
+
+func newUninstallCommand(configPath *string) *cobra.Command {
+	var includeCloudflare bool
+	var assumeYes bool
+	var dryRun bool
+	var keepConfig bool
+
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove vtunnel services, local config, and optionally Cloudflare resources",
+		Long: "Tear down what vtunnel installed: macOS LaunchAgents, the local config\n" +
+			"directory and Keychain token, and — with --cloudflare — the Cloudflare\n" +
+			"tunnel and wildcard DNS records it created. The vtunnel binary itself is\n" +
+			"removed separately with `brew uninstall vtunnel`.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out := cmd.OutOrStdout()
+			opts := uninstall.Options{IncludeCloudflare: includeCloudflare, KeepConfig: keepConfig}
+
+			interactive := !assumeYes
+			// Inspect Cloudflare when it might be removed: requested via flag, or
+			// interactive so we can offer it and show what would go.
+			inspectCF := includeCloudflare || interactive
+
+			plan, rt, err := buildUninstallPlan(cmd.Context(), *configPath, opts, inspectCF)
+			if err != nil {
+				return err
+			}
+
+			printUninstallPlan(out, plan)
+
+			if dryRun {
+				fmt.Fprintln(out, "\nDry run — nothing was removed.")
+				return nil
+			}
+
+			reader := bufio.NewReader(cmd.InOrStdin())
+
+			if interactive && !opts.IncludeCloudflare && plan.Cloudflare.Resolved {
+				if confirmPrompt(reader, out, "Also delete the Cloudflare tunnel and DNS records?", false) {
+					opts.IncludeCloudflare = true
+					plan.Options.IncludeCloudflare = true
+				}
+			}
+
+			if interactive && !confirmPrompt(reader, out, "Proceed with uninstall?", false) {
+				fmt.Fprintln(out, "Aborted.")
+				return nil
+			}
+
+			report := uninstall.Execute(cmd.Context(), plan, uninstallActions(rt))
+			printUninstallReport(out, report)
+
+			fmt.Fprintln(out, "\nThe vtunnel binary is still installed. Remove it with:")
+			fmt.Fprintln(out, "  brew uninstall vtunnel")
+
+			if report.Failed() {
+				return errors.New("uninstall completed with errors (see above)")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&includeCloudflare, "cloudflare", false, "also delete the Cloudflare tunnel and wildcard DNS records")
+	cmd.Flags().BoolVarP(&assumeYes, "yes", "y", false, "skip confirmation prompts")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be removed without changing anything")
+	cmd.Flags().BoolVar(&keepConfig, "keep-config", false, "keep ~/.config/vtunnel and the Keychain token")
+	return cmd
+}
+
+func buildUninstallPlan(ctx context.Context, configPath string, opts uninstall.Options, inspectCF bool) (uninstall.Plan, *uninstallRuntime, error) {
+	path := strings.TrimSpace(config.ExpandPath(configPath))
+	if path == "" {
+		var err error
+		path, err = config.ConfigPath()
+		if err != nil {
+			return uninstall.Plan{}, nil, err
+		}
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return uninstall.Plan{}, nil, err
+	}
+
+	rt := &uninstallRuntime{cfg: cfg}
+	plan := uninstall.Plan{Options: opts}
+
+	if _, err := api.New(cfg).Health(ctx); err == nil {
+		plan.DaemonRunning = true
+	}
+
+	if runtime.GOOS == "darwin" {
+		if manager, specs, serr := serviceRuntimeContext(path); serr == nil {
+			rt.manager = manager
+			rt.specs = specs
+			for _, spec := range specs {
+				status := manager.Status(ctx, spec)
+				plan.Services = append(plan.Services, uninstall.Service{
+					Name:      spec.Name,
+					Label:     spec.Label,
+					PlistPath: status.Path,
+					Installed: status.Exists,
+					Loaded:    status.Loaded,
+				})
+			}
+		}
+	}
+
+	if dir, derr := config.ConfigDir(); derr == nil {
+		plan.Local = append(plan.Local, uninstall.LocalPath{
+			Label:   "Config directory " + dir,
+			Path:    dir,
+			Present: pathExists(dir),
+		})
+	}
+
+	if _, terr := readCloudflareTokenFromKeychain(); terr == nil {
+		plan.Token = true
+	}
+
+	if inspectCF {
+		plan.Cloudflare = buildCloudflareUninstallPlan(ctx, cfg, rt)
+	}
+
+	return plan, rt, nil
+}
+
+func buildCloudflareUninstallPlan(ctx context.Context, cfg config.Config, rt *uninstallRuntime) uninstall.Cloudflare {
+	cfPath := strings.TrimSpace(config.ExpandPath(cfg.Cloudflared.ConfigPath))
+	if cfPath == "" {
+		return uninstall.Cloudflare{Reason: "no cloudflared config path configured"}
+	}
+	cfCfg, err := cf.Load(cfPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return uninstall.Cloudflare{Reason: "cloudflared config not found"}
+	}
+	if err != nil {
+		return uninstall.Cloudflare{Reason: err.Error()}
+	}
+	tunnelRef := strings.TrimSpace(cfCfg.Tunnel)
+	if tunnelRef == "" {
+		return uninstall.Cloudflare{Reason: "no tunnel configured"}
+	}
+
+	result := uninstall.Cloudflare{Resolved: true, TunnelRef: tunnelRef}
+	tunnelID := tunnelRef
+	if tunnels, terr := cf.NewTunnelRunner("").List(ctx); terr == nil {
+		if tunnel, found := cf.FindTunnel(tunnels, tunnelRef); found {
+			result.TunnelName = tunnel.Name
+			result.TunnelRef = tunnel.ID
+			tunnelID = tunnel.ID
+		}
+	}
+
+	creds := strings.TrimSpace(cfCfg.CredentialsFile)
+	if creds == "" {
+		home, _ := os.UserHomeDir()
+		creds = filepath.Join(home, ".cloudflared", tunnelID+".json")
+	}
+	result.Creds = uninstall.LocalPath{
+		Label:   "Tunnel credentials " + creds,
+		Path:    creds,
+		Present: pathExists(creds),
+	}
+
+	client, _, cerr := newCloudflareClientFromKeychain()
+	if cerr != nil {
+		result.Reason = "DNS not inspected (" + cerr.Error() + ")"
+		return result
+	}
+	rt.cfClient = client
+
+	zones, zerr := client.ListZones(ctx)
+	if zerr != nil {
+		result.Reason = "DNS not inspected (" + zerr.Error() + ")"
+		return result
+	}
+	zonesByName := map[string]cfapi.Zone{}
+	for _, zone := range zones {
+		zonesByName[routes.NormalizeHostname(zone.Name)] = zone
+	}
+
+	expected := tunnelID + ".cfargotunnel.com"
+	for _, domain := range uninstallDomains(cfg) {
+		zone, ok := zonesByName[domain]
+		if !ok {
+			continue
+		}
+		records, rerr := client.ListDNSRecords(ctx, zone.ID, cfapi.DNSRecordFilter{Name: "*." + domain, Type: "CNAME"})
+		if rerr != nil {
+			continue
+		}
+		for _, record := range records {
+			if strings.EqualFold(strings.TrimSuffix(record.Content, "."), expected) {
+				result.Records = append(result.Records, uninstall.DNSRecord{
+					ZoneID:   zone.ID,
+					RecordID: record.ID,
+					Hostname: record.Name,
+				})
+			}
+		}
+	}
+	return result
+}
+
+func uninstallActions(rt *uninstallRuntime) uninstall.Actions {
+	cfg := rt.cfg
+	actions := uninstall.Actions{
+		StopDaemon:   func(ctx context.Context) error { return api.New(cfg).Shutdown(ctx) },
+		RemovePath:   func(path string) error { return os.RemoveAll(path) },
+		DeleteToken:  deleteCloudflareTokenFromKeychain,
+		DeleteTunnel: func(ctx context.Context, ref string) error { return cf.NewTunnelRunner("").Delete(ctx, ref, true) },
+	}
+	if len(rt.specs) > 0 {
+		manager := rt.manager
+		specs := rt.specs
+		actions.RemoveServices = func(ctx context.Context) error { return manager.Uninstall(ctx, specs) }
+	}
+	if rt.cfClient != nil {
+		client := rt.cfClient
+		actions.DeleteDNS = func(ctx context.Context, record uninstall.DNSRecord) error {
+			return client.DeleteDNSRecord(ctx, record.ZoneID, record.RecordID)
+		}
+	}
+	return actions
+}
+
+func uninstallDomains(cfg config.Config) []string {
+	seen := map[string]bool{}
+	var domains []string
+	add := func(domain string) {
+		domain = routes.NormalizeHostname(strings.TrimSpace(domain))
+		if domain == "" || seen[domain] {
+			return
+		}
+		seen[domain] = true
+		domains = append(domains, domain)
+	}
+	add(cfg.DefaultDomain)
+	for _, domain := range cfg.Domains {
+		add(domain)
+	}
+	return domains
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func printUninstallPlan(out io.Writer, plan uninstall.Plan) {
+	fmt.Fprintln(out, "vtunnel uninstall will remove:")
+	fmt.Fprintln(out)
+
+	fmt.Fprintln(out, "  macOS LaunchAgents")
+	installed := plan.InstalledServices()
+	if len(installed) == 0 {
+		fmt.Fprintln(out, "    (none installed)")
+	} else {
+		for _, svc := range installed {
+			state := "stopped"
+			if svc.Loaded {
+				state = "running"
+			}
+			fmt.Fprintf(out, "    • %s (%s)\n      %s\n", svc.Name, state, svc.PlistPath)
+		}
+	}
+
+	if plan.Options.KeepConfig {
+		fmt.Fprintln(out, "  Local data: kept (--keep-config)")
+	} else {
+		fmt.Fprintln(out, "  Local data")
+		found := false
+		for _, item := range plan.Local {
+			if item.Present {
+				fmt.Fprintf(out, "    • %s\n", item.Label)
+				found = true
+			}
+		}
+		if plan.Token {
+			fmt.Fprintln(out, "    • Cloudflare API token (macOS Keychain)")
+			found = true
+		}
+		if !found {
+			fmt.Fprintln(out, "    (nothing found)")
+		}
+	}
+
+	if plan.Options.IncludeCloudflare {
+		fmt.Fprintln(out, "  Cloudflare account resources")
+		if !plan.Cloudflare.Resolved {
+			reason := plan.Cloudflare.Reason
+			if reason == "" {
+				reason = "nothing to remove"
+			}
+			fmt.Fprintf(out, "    (%s)\n", reason)
+		} else {
+			if plan.Cloudflare.TunnelRef != "" {
+				fmt.Fprintf(out, "    • Tunnel %s\n", plan.Cloudflare.Label())
+			}
+			for _, record := range plan.Cloudflare.Records {
+				fmt.Fprintf(out, "    • DNS %s\n", record.Hostname)
+			}
+			if plan.Cloudflare.Creds.Present {
+				fmt.Fprintf(out, "    • %s\n", plan.Cloudflare.Creds.Label)
+			}
+			if plan.Cloudflare.Reason != "" {
+				fmt.Fprintf(out, "    note: %s\n", plan.Cloudflare.Reason)
+			}
+		}
+	} else {
+		fmt.Fprintln(out, "  Cloudflare account resources: kept (pass --cloudflare to also delete the tunnel and DNS)")
+	}
+}
+
+func printUninstallReport(out io.Writer, report uninstall.Report) {
+	fmt.Fprintln(out)
+	if len(report.Steps) == 0 {
+		fmt.Fprintln(out, "Nothing to remove.")
+		return
+	}
+	for _, step := range report.Steps {
+		switch step.Outcome {
+		case uninstall.Removed:
+			fmt.Fprintf(out, "  ✓ %s\n", step.Label)
+		case uninstall.Failed:
+			fmt.Fprintf(out, "  ✗ %s: %v\n", step.Label, step.Err)
+		}
+	}
+}
+
+func confirmPrompt(reader *bufio.Reader, out io.Writer, question string, defaultYes bool) bool {
+	suffix := " [y/N] "
+	if defaultYes {
+		suffix = " [Y/n] "
+	}
+	fmt.Fprint(out, question+suffix)
+	line, _ := reader.ReadString('\n')
+	answer := strings.ToLower(strings.TrimSpace(line))
+	if answer == "" {
+		return defaultYes
+	}
+	return answer == "y" || answer == "yes"
 }
 
 func serviceInstallContext(configPath string, vtunnelBin string, cloudflaredBin string) (launchd.Manager, []launchd.Spec, error) {
