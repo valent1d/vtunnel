@@ -70,8 +70,10 @@ That starts the local daemon, ensures `cloudflared` is running, and serves `loca
 | `vtunnel list` | List active routes |
 | `vtunnel logs dev` | Show request logs (`-f` to follow) |
 | `vtunnel stop dev` | Remove a route |
+| `vtunnel orbstack` | Expose an OrbStack container (interactive picker) |
 | `vtunnel status` | Show daemon and config status |
 | `vtunnel service install` | Start vtunnel automatically at login (macOS) |
+| `vtunnel uninstall` | Remove services, config, and (optionally) Cloudflare resources |
 | `vtunnel --help` | Show every command and flag |
 
 ### Exposing apps
@@ -81,6 +83,26 @@ vtunnel http 3000 dev                  # → https://dev.<default-domain>
 vtunnel http 5173 app --domain example.dev   # pick a specific domain
 vtunnel http 3000 dev --detach         # create the route and return (no log tail)
 ```
+
+The first argument can also be a full URL or `host:port`, so you can forward to any HTTP upstream — another machine, a VM, a NAS — not just a local port:
+
+```bash
+vtunnel http http://192.168.1.10:8080 nas    # forward to any host
+vtunnel http 3000 dev --target http://web.local:8080   # or via --target
+```
+
+### OrbStack containers
+
+If you use [OrbStack](https://orbstack.dev), `vtunnel` exposes Docker containers directly. Each container is reachable on the host at its `<name>.orb.local` domain, and `vtunnel` simply forwards to it.
+
+```bash
+vtunnel orbstack                       # interactive picker → choose, name, expose
+vtunnel orbstack list                  # list running containers
+vtunnel orbstack expose dolibarr-v23   # expose a container
+vtunnel orbstack expose dolibarr-v23 app1   # …with your own subdomain
+```
+
+The subdomain defaults to the container's custom domain (the `dev.orbstack.domains` label) or its name. Exposing opens the dashboard focused on the new route, where OrbStack-backed tunnels carry a `⬡` badge and a compact OrbStack detail card.
 
 ### The dashboard
 
@@ -178,6 +200,19 @@ You can also drive the daemon directly without services:
 vtunnel daemon stop
 vtunnel daemon restart
 ```
+
+## Uninstall
+
+`vtunnel uninstall` tears down everything it installed — LaunchAgents, the local config directory, and the Keychain token — showing a plan and asking before it removes anything:
+
+```bash
+vtunnel uninstall              # interactive; prints a plan, then confirms
+vtunnel uninstall --dry-run    # preview what would be removed, change nothing
+vtunnel uninstall --keep-config   # remove services but keep your config + token
+vtunnel uninstall --cloudflare    # also delete the tunnel and wildcard DNS records
+```
+
+Your Cloudflare account is left untouched by default — pass `--cloudflare` to also delete the tunnel and the wildcard DNS it created. The binary itself is removed separately with `brew uninstall vtunnel`.
 
 ## Configuration
 
