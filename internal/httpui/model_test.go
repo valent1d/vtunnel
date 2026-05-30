@@ -41,6 +41,44 @@ func TestRenderDashboard(t *testing.T) {
 	}
 }
 
+func TestRenderShowsOrbStackBadgeAndDetail(t *testing.T) {
+	route := routes.Route{
+		Hostname:  "doli23.example.test",
+		Target:    "http://dolibarr-v23.orb.local",
+		CreatedAt: time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC),
+		Orbstack: &routes.OrbstackInfo{
+			Container:     "dolibarr-v23",
+			Image:         "dolibarr/dolibarr:23",
+			OrbDomain:     "dolibarr-v23.orb.local",
+			CustomDomains: []string{"doli23.local"},
+		},
+	}
+	output := ansi.Strip(Render(Snapshot{
+		Routes:        []routes.Route{route},
+		SelectedRoute: route,
+		Width:         110,
+		Height:        40,
+	}))
+	for _, want := range []string{orbstackBadge, "OrbStack", "dolibarr-v23", "dolibarr/dolibarr:23", "doli23.local"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output does not contain %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestRenderNoOrbStackBlockForPlainRoute(t *testing.T) {
+	route := routes.Route{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}
+	output := ansi.Strip(Render(Snapshot{
+		Routes:        []routes.Route{route},
+		SelectedRoute: route,
+		Width:         110,
+		Height:        40,
+	}))
+	if strings.Contains(output, "OrbStack") {
+		t.Fatalf("plain route should not render an OrbStack block:\n%s", output)
+	}
+}
+
 func TestRenderFitsWidth(t *testing.T) {
 	route := routes.Route{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}
 	width := 96

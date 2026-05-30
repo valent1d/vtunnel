@@ -164,9 +164,15 @@ func renderTunnelList(snapshot Snapshot, width int, minRows int) string {
 				style = selectedInactiveStyle
 			}
 		}
+		// A 1-char marker sits between the cursor prefix and the name (the name
+		// field shrinks by one to keep columns aligned), badging OrbStack routes.
+		marker := " "
+		if route.Orbstack != nil {
+			marker = orbstackBadge
+		}
 		name := routeName(route.Hostname)
 		host := route.Hostname
-		line := fmt.Sprintf("%s %-13s %s", prefix, name, host)
+		line := fmt.Sprintf("%s%s %-12s %s", prefix, marker, name, host)
 		lines = append(lines, style.Render(truncate(line, width-4)))
 	}
 	return renderBox(fmt.Sprintf("Tunnels (%d)", len(snapshot.Routes)), strings.Join(padRows(lines, minRows), "\n"), width)
@@ -177,9 +183,11 @@ func renderRightPane(snapshot Snapshot, width int, availableRows int) string {
 	// One bucket per displayed column, 1s each: the chart shows the last N seconds.
 	chartWidth := max(10, width-2)
 	stats := computeStats(snapshot.Logs, route.CreatedAt, snapshot.Now, chartWidth, time.Second)
-	top := lipgloss.JoinVertical(
-		lipgloss.Left,
-		renderHero(route, stats, snapshot.Edge, width),
+	sections := []string{renderHero(route, stats, snapshot.Edge, width)}
+	if route.Orbstack != nil {
+		sections = append(sections, "", renderOrbStack(route.Orbstack, width))
+	}
+	sections = append(sections,
 		"",
 		renderOverview(stats, snapshot.Edge, width),
 		"",
@@ -187,6 +195,7 @@ func renderRightPane(snapshot Snapshot, width int, availableRows int) string {
 		"",
 		renderEdge(snapshot.Edge, width),
 	)
+	top := lipgloss.JoinVertical(lipgloss.Left, sections...)
 	// The request list takes whatever height remains below the cards (1 blank
 	// separator + 2 box borders), so the pane fits exactly in availableRows.
 	logRows := availableRows - (strings.Count(top, "\n") + 1) - 3
@@ -213,6 +222,23 @@ func renderHero(route routes.Route, stats Stats, edge cloudflared.EdgeStatus, wi
 	}
 	body := url + mutedStyle.Render("  →  ") + commandStyle.Render(route.Target) + "\n" + meta
 	return renderBox(route.Hostname, body, width)
+}
+
+// orbstackBadge marks OrbStack-backed routes in the tunnel list.
+const orbstackBadge = "⬡"
+
+// renderOrbStack is a compact detail card shown for OrbStack-backed routes:
+// the container, its image, and any custom domains. Kept to two lines so it
+// barely costs vertical space in the right pane.
+func renderOrbStack(info *routes.OrbstackInfo, width int) string {
+	body := commandStyle.Render(orbstackBadge+" "+info.Container)
+	if info.Image != "" {
+		body += mutedStyle.Render("  ·  " + info.Image)
+	}
+	if len(info.CustomDomains) > 0 {
+		body += "\n" + mutedStyle.Render("domains  ") + strings.Join(info.CustomDomains, ", ")
+	}
+	return renderBox("OrbStack", body, width)
 }
 
 func renderOverview(stats Stats, edge cloudflared.EdgeStatus, width int) string {

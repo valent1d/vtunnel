@@ -17,6 +17,19 @@ type Route struct {
 	Hostname  string    `json:"hostname"`
 	Target    string    `json:"target"`
 	CreatedAt time.Time `json:"created_at"`
+	// Orbstack is set when the route exposes an OrbStack container. It is
+	// optional metadata for display (badge, detail pane) and does not affect
+	// routing; nil for ordinary routes. omitempty keeps existing routes.json
+	// files unchanged.
+	Orbstack *OrbstackInfo `json:"orbstack,omitempty"`
+}
+
+// OrbstackInfo describes the OrbStack container behind a route.
+type OrbstackInfo struct {
+	Container     string   `json:"container"`
+	Image         string   `json:"image,omitempty"`
+	OrbDomain     string   `json:"orb_domain,omitempty"`
+	CustomDomains []string `json:"custom_domains,omitempty"`
 }
 
 type Store struct {
