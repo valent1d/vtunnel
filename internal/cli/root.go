@@ -89,6 +89,7 @@ func NewRootCommand() *cobra.Command {
 		newAccessCommand(&configPath),
 		newTCPCommand(&configPath),
 		newSSHCommand(&configPath),
+		newMCPCommand(&configPath),
 		newUninstallCommand(&configPath),
 	)
 

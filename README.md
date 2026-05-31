@@ -201,6 +201,30 @@ vtunnel ssh rm box                                # remove one (also deletes its
 
 > Because of this, when you run `vtunnel tcp 22 …` (or any host on port 22) vtunnel notices it's SSH and offers to set up browser SSH instead. Pick **yes** and it walks you through it; pick **no** to keep the plain TCP tunnel. Tick *Don't ask me again* to silence the prompt (stored as `prefs.suppress_ssh_suggestion` in the config).
 
+## Use with Claude Code & other AI agents (MCP)
+
+vtunnel ships a built-in **Model Context Protocol** server, so an AI agent can create and inspect tunnels for you — e.g. *"spin up a public URL for my Stripe webhook and show me what Stripe sends."*
+
+Add it to Claude Code:
+
+```bash
+claude mcp add vtunnel -- vtunnel mcp
+```
+
+(Or, for any MCP client, run `vtunnel mcp` as a stdio server.) It exposes:
+
+| Tool | What it does |
+|------|--------------|
+| `create_http_tunnel` | Create a **public** HTTPS tunnel to a local port and return its URL — ideal for webhooks. |
+| `list_tunnels` | List active tunnels (hostname, URL, target, whether Access-protected). |
+| `stop_tunnel` | Remove a tunnel (and tear down its Access protection, if any). |
+| `inspect_requests` | List recent captured requests, or fetch one in full (headers + body) — for debugging payloads. |
+| `replay_request` | Re-issue a captured request to your upstream (replay a webhook while you fix the handler). |
+
+It also publishes a `vtunnel://requests` resource (recent captured requests as JSON).
+
+> **Heads-up:** `create_http_tunnel` makes a **public** URL — anyone with the link can reach the local service. That's what you want for a webhook; for anything else, protect it with `vtunnel access protect` or the dashboard. vtunnel must already be set up (a tunnel + domain); the MCP server starts cloudflared and the daemon as needed.
+
 ## One-time setup
 
 Most people just run `vtunnel onboarding` and never touch this. If you'd rather drive setup yourself, `vtunnel setup` runs the same diagnostics and applies fixes with explicit flags (it prints a dry-run plan by default).
