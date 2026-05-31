@@ -12,6 +12,8 @@
 vtunnel http 3000 dev   →   https://dev.example.com
 ```
 
+<img src="site/demo.gif" alt="vtunnel demo — expose a local port, get a public URL, and inspect requests live" width="820">
+
 </div>
 
 ---
@@ -80,7 +82,7 @@ That starts the local daemon, ensures `cloudflared` is running, and serves `loca
 | `vtunnel list` | List active routes |
 | `vtunnel logs dev` | Show request logs (`-f` to follow) |
 | `vtunnel stop dev` | Remove a route |
-| `vtunnel orbstack` | Expose an OrbStack container (interactive picker) |
+| `vtunnel orbstack` | Expose an OrbStack container (opens the dashboard create modal) |
 | `vtunnel status` | Show daemon and config status |
 | `vtunnel service install` | Start vtunnel automatically at login (macOS) |
 | `vtunnel uninstall` | Remove services, config, and (optionally) Cloudflare resources |
@@ -101,15 +103,15 @@ vtunnel http http://192.168.1.10:8080 nas    # forward to any host
 vtunnel http 3000 dev --target http://web.local:8080   # or via --target
 ```
 
-### OrbStack containers
+### OrbStack containers (MacOS Only)
 
 If you use [OrbStack](https://orbstack.dev), `vtunnel` exposes Docker containers directly. Each container is reachable on the host at its `<name>.orb.local` domain, and `vtunnel` simply forwards to it.
 
 ```bash
-vtunnel orbstack                       # interactive picker → choose, name, expose
+vtunnel orbstack                       # interactive TUI → choose, name, access, expose
 vtunnel orbstack list                  # list running containers
-vtunnel orbstack expose dolibarr-v23   # expose a container
-vtunnel orbstack expose dolibarr-v23 app1   # …with your own subdomain
+vtunnel orbstack expose my-container   # expose a container
+vtunnel orbstack expose my-container my-app   # …with your own subdomain
 vtunnel orbstack watch                 # auto-expose containers as they come and go
 ```
 
@@ -146,7 +148,7 @@ vtunnel cloudflare auth --access     # grant vtunnel an Access-write token
 vtunnel access status                # Zero Trust state, identity providers, protected routes
 
 vtunnel http 8080 admin --protect --allow you@example.com        # email one-time PIN
-vtunnel http 8080 admin --protect=sso --idp "Authentik"          # SSO (allow optional)
+vtunnel http 8080 admin --protect=sso --idp "My IDP"          # SSO (allow optional)
 vtunnel access protect admin --allow @example.com                # protect an existing route
 vtunnel access pause admin           # temporarily public (keeps config) · resume to re-enable
 vtunnel access unprotect admin                                   # back to public
@@ -160,17 +162,17 @@ vtunnel access idp add google --apps-domain example.com --client-id … --client
 You can also manage all of this **from the HTTP dashboard**: press `a` on a route to open the Access panel (choose Public / SSO / OTP, pick the identity provider, set who's allowed, pause/resume), and the "new tunnel" form has a Protect step so you can secure a route as you create it.
 
 - **`--protect` / `--protect=otp`** — email one-time PIN (no identity provider needed). `--allow` is required (an email or `@domain`). For a single-person route, just allow one email.
-- **`--protect=sso`** — use an identity provider (`--idp <name>`); Authentik (OIDC) and Google Workspace are supported. `--allow` is optional — leave it out to allow anyone who signs in through that provider, or narrow with `@domain`.
+- **`--protect=sso`** — use an identity provider (`--idp <name>`); Authentik (OIDC) and Google Workspace are supported for now. `--allow` is optional — leave it out to allow anyone who signs in through that provider, or narrow with `@domain`.
 
 Protection is created **before** the route is published (the hostname is never briefly public), and rolled back if publishing fails. Protected routes show a 🔒 badge in the dashboard. If you must enable Zero Trust first, `vtunnel access status` walks you through the one-time dashboard step.
 
-> First-time Zero Trust activation (choosing a team name and plan) is done once in the Cloudflare dashboard — Cloudflare requires a card even on the free plan, and you are not charged.
+> First-time Zero Trust activation (choosing a team name and plan) is done once in the Cloudflare dashboard — FYI, Cloudflare requires a card even on the free plan, and you are not charged.
 
 ## TCP tunnels (databases, SSH, …)
 
 vtunnel can also expose **TCP** services (Postgres, MySQL/MariaDB, SSH, Redis…) through the same Cloudflare Tunnel.
 
-> **Important — TCP is not zero-install like HTTP.** A browser speaks HTTP, so HTTP routes work for anyone with the link. A database/SSH client speaks a raw protocol, and Cloudflare's edge only serves HTTP on its web ports — there is **no public `db.example.com:5432` to dial** on the free plan. So the **connecting machine** must wrap the raw TCP into the tunnel with `cloudflared` (that's what `vtunnel tcp connect` does). Use TCP tunnels to reach your own service from another of your machines, or to give a teammate who can install `cloudflared` access — not for anonymous, install-free access.
+> **Important — TCP is not zero-install like HTTP.** A browser speaks HTTP, so HTTP routes work for anyone with the link. A database/SSH client speaks a raw protocol, and Cloudflare's edge only serves HTTP on its web ports — there is **no public `db.example.com:5432` to dial** on the free plan. So the **connecting machine** must wrap the raw TCP into the tunnel with `cloudflared` (that's what `vtunnel tcp connect` does). Use TCP tunnels to reach your own service from another of your machines, or to give a teammate who can install `cloudflared` and `vtunnel` access — not for anonymous, install-free access.
 
 **On the machine that has the service** (and runs the tunnel):
 
@@ -178,14 +180,14 @@ vtunnel can also expose **TCP** services (Postgres, MySQL/MariaDB, SSH, Redis…
 vtunnel tcp                           # open the TCP dashboard (list / new / remove)
 vtunnel tcp 5432 db                   # expose localhost:5432 at db.<domain>
 vtunnel tcp 192.168.1.10:22 ssh       # …or any host:port
-vtunnel orbstack expose doli-db --tcp # an OrbStack container's port (e.g. MariaDB)
+vtunnel orbstack expose db-container --tcp # an OrbStack container's port (e.g. MariaDB)
 vtunnel tcp list                      # list TCP tunnels
 vtunnel tcp rm db                     # remove one
 ```
 
 Adding or removing a TCP tunnel **restarts cloudflared** to apply the change, which briefly reconnects all tunnels (HTTP included).
 
-**On the machine that wants to connect** (needs `cloudflared` installed):
+**On the machine that wants to connect** (needs `cloudflared` and `vtunnel` installed):
 
 ```bash
 vtunnel tcp connect db --port 5432    # opens 127.0.0.1:5432, keep it running
@@ -202,7 +204,7 @@ For SSH specifically there's a better option than a TCP tunnel: **`vtunnel ssh`*
 vtunnel ssh                                       # open the browser-SSH dashboard (list / new / remove)
 vtunnel ssh box --allow you@example.com           # localhost:22 → https://box.<domain>
 vtunnel ssh box --allow @example.com --target 192.168.1.10:22
-vtunnel ssh box --allow you@example.com --idp Authentik   # SSO instead of email OTP
+vtunnel ssh box --allow you@example.com --idp My-idp   # SSO instead of email OTP
 vtunnel ssh list                                  # list browser SSH endpoints
 vtunnel ssh rm box                                # remove one (also deletes its Access app)
 ```
@@ -301,16 +303,18 @@ vtunnel cloudflare status   # read-only discovery of accounts, zones, DNS
 
 The token is stored in the macOS Keychain and is entirely optional — tunnels are discovered through `cloudflared` and `cert.pem`, not the API token. DNS repair falls back to `cloudflared tunnel route dns` when no token is present.
 
-## Run at login (macOS)
+## Run at login (macOS & Linux)
 
-Install `vtunnel` and `cloudflared` as user LaunchAgents so they start automatically:
+Install `vtunnel` and `cloudflared` as user LaunchAgents / Linux systemd services so they start automatically:
 
 ```bash
 vtunnel service install
 vtunnel service status
 ```
 
-This writes LaunchAgents (`sh.vltn.vtunnel.daemon`, `sh.vltn.vtunnel.cloudflared`) under `~/Library/LaunchAgents/` and manages them with `launchctl`. They restart when you log in.
+On **macOS** this writes LaunchAgents (`sh.vltn.vtunnel.daemon`, `sh.vltn.vtunnel.cloudflared`) under `~/Library/LaunchAgents/` and manages them with `launchctl`. On **Linux** it writes systemd **user** units under `~/.config/systemd/user/` and manages them with `systemctl --user`. Either way, they start automatically when you log in.
+
+> On a headless Linux box, run `loginctl enable-linger "$USER"` once so the user services keep running without an active login session.
 
 ```bash
 vtunnel service start
@@ -385,7 +389,7 @@ The core — proxy, daemon, routing, request logs, MCP server — is shared. Orb
 
 - **[Go](https://go.dev)** — a single static binary, no runtime to install
 - **[Cobra](https://github.com/spf13/cobra)** — command-line framework
-- **[Bubble Tea](https://github.com/charmbracelet/bubbletea)**, **[Lip Gloss](https://github.com/charmbracelet/lipgloss)** & **[Bubbles](https://github.com/charmbracelet/bubbles)** — the [Charm](https://charm.sh) stack behind the onboarding wizard and TUI dashboard
+- **[Bubble Tea](https://github.com/charmbracelet/bubbletea)**, **[Lip Gloss](https://github.com/charmbracelet/lipgloss)** & **[Bubbles](https://github.com/charmbracelet/bubbles)** — the [Charm](https://charm.sh) stack behind the onboarding wizard and TUI dashboards
 
 ---
 
