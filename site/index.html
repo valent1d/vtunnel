@@ -80,6 +80,8 @@
   }
   .btn:hover { text-decoration: none; transform: translateY(-2px); border-color: var(--green); }
   .btn.primary { background: rgba(0,255,135,0.12); border-color: rgba(0,255,135,0.4); color: var(--green); }
+  .demo { margin: 2.75rem auto 0; max-width: 760px; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #161b22; box-shadow: 0 24px 60px -30px rgba(0,255,135,0.25); }
+  .demo img { display: block; width: 100%; height: auto; }
 
   /* ---- terminal command cards ---- */
   .term {
@@ -178,6 +180,10 @@
       <a class="btn primary" href="#install">Install</a>
       <a class="btn" href="/docs.html">Documentation</a>
     </div>
+    <figure class="demo reveal" id="demo-figure">
+      <img src="/demo.gif" alt="vtunnel in action: expose a local port, get a public URL, watch requests live"
+           loading="lazy" onerror="var f=document.getElementById('demo-figure'); if (f) f.remove();">
+    </figure>
   </section>
 
   <section id="install">
