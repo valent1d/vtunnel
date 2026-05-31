@@ -26,7 +26,7 @@ on:
         default: false
         type: boolean
       update_tap:
-        description: "Update valent1d/homebrew-vtunnel after publishing the release"
+        description: "Update valent1d/homebrew-tap after publishing the release"
         required: true
         default: true
         type: boolean
@@ -137,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${HOMEBREW_TAP_TOKEN}" ]]; then
-            echo "::error::Missing repository secret HOMEBREW_TAP_TOKEN. Create a fine-grained GitHub token with Contents: Read and write on valent1d/homebrew-vtunnel."
+            echo "::error::Missing repository secret HOMEBREW_TAP_TOKEN. Create a fine-grained GitHub token with Contents: Read and write on valent1d/homebrew-tap."
             exit 1
           fi
 
@@ -145,7 +145,7 @@ jobs:
         if: steps.version.outputs.update_tap == 'true' && steps.version.outputs.draft != 'true'
         uses: actions/checkout@v4
         with:
-          repository: valent1d/homebrew-vtunnel
+          repository: valent1d/homebrew-tap
           path: homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 

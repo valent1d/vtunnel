@@ -46,7 +46,7 @@ Cloudflare and `cloudflared` are configured **once** with a wildcard ingress rul
 On **macOS**, the Homebrew tap is recommended:
 
 ```bash
-brew install valent1d/vtunnel/vtunnel
+brew install valent1d/tap/vtunnel
 ```
 
 On **Linux** (or macOS without Homebrew), use the install script — it detects your OS/arch, verifies the checksum, and installs the binary:
