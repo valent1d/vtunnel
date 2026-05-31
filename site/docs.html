@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vtunnel — documentation</title>
+<meta name="description" content="vtunnel documentation: install, daily commands, TCP, browser SSH, Cloudflare Access, MCP server.">
+<meta name="theme-color" content="#0d1117">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<style>
+  :root {
+    --bg: #0d1117; --panel: rgba(255,255,255,0.025); --border: #21262d;
+    --border-soft: rgba(255,255,255,0.08); --green: #00ff87; --text: #e6edf3; --muted: #8b949e;
+    --code-bg: #161b22;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); line-height: 1.65; -webkit-font-smoothing: antialiased; }
+  body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none; background: radial-gradient(60rem 26rem at 50% -8rem, rgba(0,255,135,0.08), transparent 70%); }
+  a { color: var(--green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header {
+    position: sticky; top: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; padding: .8rem clamp(1rem, 4vw, 2.5rem);
+    background: rgba(13,17,23,0.6); backdrop-filter: blur(14px) saturate(150%); -webkit-backdrop-filter: blur(14px) saturate(150%);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .brand { display: inline-flex; align-items: baseline; gap: .12rem; font-family: var(--mono); font-weight: 700; font-size: 1.1rem; }
+  .brand:hover { text-decoration: none; }
+  .brand .chev, .brand .cursor { color: var(--green); }
+  .brand .name { color: var(--text); margin-left: .35rem; }
+  .brand .cursor { margin-left: .12rem; animation: blink 1.1s steps(1) infinite; }
+  .nav { display: flex; align-items: center; gap: 1.2rem; font-family: var(--mono); font-size: .9rem; }
+  .nav a { color: var(--muted); display: inline-flex; align-items: center; gap: .4rem; transition: color .2s; }
+  .nav a:hover { color: var(--text); text-decoration: none; }
+  .nav svg { width: 18px; height: 18px; }
+
+  .docs { max-width: 1080px; margin: 0 auto; display: grid; grid-template-columns: 240px 1fr; gap: 2.5rem; padding: 2rem clamp(1rem, 4vw, 2rem) 3rem; }
+  .toc { position: sticky; top: 5rem; align-self: start; max-height: calc(100vh - 7rem); overflow-y: auto; font-size: .9rem; padding-right: .5rem; }
+  .toc-title { font-family: var(--mono); text-transform: uppercase; letter-spacing: .1em; font-size: .72rem; color: var(--muted); margin: 0 0 .75rem; }
+  .toc a { display: block; color: var(--muted); padding: .25rem 0 .25rem .7rem; border-left: 2px solid transparent; transition: color .15s, border-color .15s; }
+  .toc a:hover { color: var(--text); text-decoration: none; }
+  .toc a.lvl-3 { padding-left: 1.5rem; font-size: .85rem; }
+  .toc a.active { color: var(--green); border-left-color: var(--green); }
+
+  .content { min-width: 0; }
+  .loading, .error { color: var(--muted); font-family: var(--mono); padding: 2rem 0; }
+  .error a { color: var(--green); }
+
+  /* markdown theme */
+  .content h1 { font-size: 1.9rem; margin: 0 0 1rem; }
+  .content h2 { font-size: 1.45rem; margin: 2.4rem 0 1rem; padding-bottom: .35rem; border-bottom: 1px solid var(--border); scroll-margin-top: 5rem; }
+  .content h3 { font-size: 1.15rem; margin: 1.8rem 0 .75rem; scroll-margin-top: 5rem; }
+  .content h4 { font-size: 1rem; margin: 1.4rem 0 .5rem; scroll-margin-top: 5rem; }
+  .content p, .content li { color: #c5cdd6; }
+  .content a.anchor { display: none; }
+  .content code { font-family: var(--mono); font-size: .88em; background: var(--code-bg); border: 1px solid var(--border); border-radius: 5px; padding: .12em .4em; }
+  .content pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem; overflow-x: auto; line-height: 1.5; }
+  .content pre code { background: none; border: 0; padding: 0; font-size: .86rem; color: #d7e0da; }
+  .content table { border-collapse: collapse; width: 100%; margin: 1rem 0; display: block; overflow-x: auto; }
+  .content th, .content td { border: 1px solid var(--border); padding: .5rem .8rem; text-align: left; }
+  .content th { background: rgba(255,255,255,0.03); }
+  .content blockquote { margin: 1rem 0; padding: .5rem 1rem; border-left: 3px solid var(--green); background: rgba(0,255,135,0.04); color: var(--muted); border-radius: 0 8px 8px 0; }
+  .content blockquote p { color: var(--muted); margin: .35rem 0; }
+  .content img { max-width: 100%; height: auto; }
+  .content hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+  .content ul, .content ol { padding-left: 1.4rem; }
+  .content li { margin: .3rem 0; }
+
+  footer { max-width: 1080px; margin: 2rem auto 0; padding: 1.5rem clamp(1rem, 4vw, 2rem); border-top: 1px solid var(--border-soft); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .75rem; font-family: var(--mono); font-size: .85rem; color: var(--muted); }
+  footer a { color: var(--muted); transition: color .2s; }
+  footer a:hover { color: var(--green); text-decoration: none; }
+  footer .vltn { color: var(--text); }
+
+  @keyframes blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+  @media (max-width: 760px) {
+    .docs { grid-template-columns: 1fr; gap: 1rem; }
+    .toc { position: static; max-height: none; border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="/" aria-label="vtunnel home">
+    <span class="chev">❯</span><span class="name">vtunnel</span><span class="cursor" aria-hidden="true">█</span>
+  </a>
+  <nav class="nav">
+    <a href="/">Home</a>
+    <a href="https://github.com/valent1d/vtunnel" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.7-1.3-1.7-1.1-.8 0-.8 0-.8 1.2 0 1.9 1.2 1.9 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2 0-.4-.5-1.6.2-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 5 18 5.3 18 5.3c.7 1.6.2 2.8.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .5Z"/></svg>
+      GitHub
+    </a>
+  </nav>
+</header>
+
+<div class="docs">
+  <aside class="toc">
+    <p class="toc-title">Documentation</p>
+    <nav id="toc"></nav>
+  </aside>
+  <article class="content" id="content">
+    <p class="loading">Loading documentation…</p>
+  </article>
+</div>
+
+<footer>
+  <span>© 2026 <a class="vltn" href="https://vltn.sh" target="_blank" rel="noopener">VLTN</a></span>
+  <a href="https://github.com/valent1d/vtunnel" target="_blank" rel="noopener">github.com/valent1d/vtunnel</a>
+</footer>
+
+<script>
+  var REPO = "valent1d/vtunnel";
+  var CACHE_KEY = "vtunnel-readme-html-v1";
+  var CACHE_TTL = 15 * 60 * 1000;
+  var content = document.getElementById("content");
+  var tocEl = document.getElementById("toc");
+
+  function readCache() {
+    try {
+      var c = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
+      if (c && (Date.now() - c.t) < CACHE_TTL && c.html) return c.html;
+    } catch (e) {}
+    return null;
+  }
+  function writeCache(html) {
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), html: html })); } catch (e) {}
+  }
+
+  function render(html) {
+    content.innerHTML = html;
+    var headings = content.querySelectorAll("h2, h3");
+    var items = [];
+    headings.forEach(function (h) {
+      // GitHub places <a class="anchor" href="#slug"> right after the heading.
+      var slug = "";
+      var inner = h.querySelector("a.anchor");
+      var sib = h.nextElementSibling;
+      if (inner && inner.getAttribute("href")) slug = inner.getAttribute("href");
+      else if (sib && sib.matches && sib.matches("a.anchor") && sib.getAttribute("href")) slug = sib.getAttribute("href");
+      if (!slug) return;
+      var id = slug.replace(/^#/, "");
+      h.id = id;
+      items.push({ id: id, text: h.textContent.trim(), level: h.tagName === "H3" ? 3 : 2 });
+    });
+    buildTOC(items);
+    setupScrollSpy();
+  }
+
+  function buildTOC(items) {
+    tocEl.innerHTML = "";
+    items.forEach(function (it) {
+      var a = document.createElement("a");
+      a.href = "#" + it.id;
+      a.textContent = it.text;
+      a.className = it.level === 3 ? "lvl-3" : "lvl-2";
+      a.addEventListener("click", function (e) {
+        e.preventDefault();
+        var el = document.getElementById(it.id);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+          history.replaceState(null, "", "#" + it.id);
+        }
+      });
+      tocEl.appendChild(a);
+    });
+  }
+
+  function setupScrollSpy() {
+    var links = {};
+    tocEl.querySelectorAll("a").forEach(function (a) { links[a.getAttribute("href").slice(1)] = a; });
+    var headings = content.querySelectorAll("h2, h3");
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          Object.keys(links).forEach(function (k) { links[k].classList.remove("active"); });
+          var active = links[entry.target.id];
+          if (active) active.classList.add("active");
+        }
+      });
+    }, { rootMargin: "-10% 0px -80% 0px", threshold: 0 });
+    headings.forEach(function (h) { if (h.id) observer.observe(h); });
+  }
+
+  function showError() {
+    content.innerHTML = '<p class="error">Could not load the documentation right now. ' +
+      'Read it on <a href="https://github.com/valent1d/vtunnel#readme" target="_blank" rel="noopener">GitHub</a>.</p>';
+  }
+
+  (function load() {
+    var cached = readCache();
+    if (cached) { render(cached); return; }
+    fetch("https://api.github.com/repos/" + REPO + "/readme", { headers: { Accept: "application/vnd.github.html" } })
+      .then(function (res) { if (!res.ok) throw new Error("HTTP " + res.status); return res.text(); })
+      .then(function (html) { writeCache(html); render(html); })
+      .catch(function () { showError(); });
+  })();
+</script>
+</body>
+</html>
