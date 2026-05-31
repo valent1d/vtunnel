@@ -61,7 +61,7 @@
   .content code { font-family: var(--mono); font-size: .88em; background: var(--code-bg); border: 1px solid var(--border); border-radius: 5px; padding: .12em .4em; }
   .content pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
   .content pre code { background: none; border: 0; padding: 0; font-size: .86rem; color: #d7e0da; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .content .logo-img { display: block; margin: 0 auto 1.5rem; max-width: 360px; }
+  .content .logo-img { display: block; margin: 0 auto 1.75rem; width: 240px; max-width: 60%; }
   .content table { border-collapse: collapse; width: 100%; margin: 1rem 0; display: block; overflow-x: auto; }
   .content th, .content td { border: 1px solid var(--border); padding: .5rem .8rem; text-align: left; }
   .content th { background: rgba(255,255,255,0.03); }
@@ -144,12 +144,15 @@
         (img.closest("p") || img).remove();
         return;
       }
-      // Swap the README's logo for the local SVG (the GitHub-proxied one is flaky).
+      // Swap the README's logo for the local SVG (the GitHub-proxied one is flaky)
+      // and unwrap GitHub's link to the raw asset so it isn't clickable.
       if (/vtunnel-logo/i.test(src) || alt === "vtunnel") {
         img.setAttribute("src", "/vtunnel-logo.svg");
         img.removeAttribute("width");
         img.removeAttribute("height");
         img.classList.add("logo-img");
+        var anchor = img.closest("a");
+        if (anchor) anchor.replaceWith(img);
       }
     });
 
