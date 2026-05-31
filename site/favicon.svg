@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="vtunnel">
+  <rect width="64" height="64" rx="14" fill="#0d1117"/>
+  <rect x="1.5" y="1.5" width="61" height="61" rx="12.5" fill="none" stroke="#21262d" stroke-width="2"/>
+  <text x="34" y="32" text-anchor="middle" dominant-baseline="central"
+        font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace"
+        font-size="46" font-weight="700" fill="#00ff87">❯</text>
+</svg>
