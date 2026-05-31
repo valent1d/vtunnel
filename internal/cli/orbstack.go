@@ -16,6 +16,7 @@ import (
 
 	"vtunnel/internal/api"
 	"vtunnel/internal/config"
+	"vtunnel/internal/httpui"
 	"vtunnel/internal/orbstack"
 	"vtunnel/internal/routes"
 )
@@ -27,15 +28,54 @@ func newOrbstackClient() orbstack.Client {
 	return orbstack.New(orbstackRunner)
 }
 
+// orbstackProvider adapts the OrbStack client to httpui.OrbstackProvider so the
+// HTTP dashboard can list and expose containers from its create modal.
+func orbstackProvider() httpui.OrbstackProvider { return cliOrbstackProvider{} }
+
+type cliOrbstackProvider struct{}
+
+func (cliOrbstackProvider) List(ctx context.Context) ([]httpui.OrbContainer, error) {
+	all, err := newOrbstackClient().List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]httpui.OrbContainer, 0, len(all))
+	for _, container := range all {
+		if !container.HTTP {
+			continue
+		}
+		out = append(out, httpui.OrbContainer{
+			Name:             container.Name,
+			Image:            container.Image,
+			OrbDomain:        container.OrbDomain,
+			CustomDomains:    container.CustomDomains,
+			Target:           container.Target(),
+			DefaultSubdomain: container.DefaultSubdomain(),
+		})
+	}
+	return out, nil
+}
+
 func newOrbstackCommand(configPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "orbstack",
 		Short: "Discover and expose OrbStack containers",
 		Long: "Expose OrbStack Docker containers through vtunnel. With no subcommand,\n" +
-			"opens an interactive picker. Each container is reachable at its\n" +
+			"opens the HTTP dashboard with the create modal on the OrbStack source —\n" +
+			"pick a container and expose it. Each container is reachable at its\n" +
 			"<name>.orb.local domain, which vtunnel forwards to.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runOrbstackPicker(cmd, configPath)
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+			if err := config.EnsureDirs(); err != nil {
+				return err
+			}
+			if err := ensureDaemon(cmd.Context(), cfg, *configPath); err != nil {
+				return err
+			}
+			return runHTTPUI(cmd.Context(), cfg, "", accessControllerFor(cfg), orbstackProvider(), httpui.Options{OpenCreateOrbstack: true})
 		},
 	}
 	cmd.AddCommand(
@@ -143,8 +183,8 @@ func newOrbstackWatchCommand(configPath *string) *cobra.Command {
 // watch-managed route points at a container that is gone. Manual routes (those
 // without Orbstack metadata, or not Managed) are never created over nor removed.
 func reconcileOrbstackRoutes(containers []orbstack.Container, existing []routes.Route, cfg config.Config, domainFlag string) (create []routes.Route, remove []string, err error) {
-	routedDomains := map[string]bool{}            // orb domain -> already has any route
-	managedByDomain := map[string]routes.Route{}  // orb domain -> watch-managed route
+	routedDomains := map[string]bool{}           // orb domain -> already has any route
+	managedByDomain := map[string]routes.Route{} // orb domain -> watch-managed route
 	for _, route := range existing {
 		if host := targetHost(route.Target); host != "" {
 			routedDomains[host] = true
@@ -344,7 +384,7 @@ func exposeOrbstackContainer(cmd *cobra.Command, configPath *string, container o
 	if detach {
 		return nil
 	}
-	return runHTTPUI(cmd.Context(), cfg, hostname, accessControllerFor(cfg))
+	return runHTTPUI(cmd.Context(), cfg, hostname, accessControllerFor(cfg), orbstackProvider(), httpui.Options{})
 }
 
 // exposedTargets maps an OrbStack domain to the public hostname currently

@@ -182,38 +182,3 @@ func TestReconcileErrorsWithoutDomain(t *testing.T) {
 		t.Fatal("expected error when no domain is configured")
 	}
 }
-
-func TestOrbstackPickerModelSelection(t *testing.T) {
-	containers := []orbstack.Container{
-		{Name: "dolibarr-v23", OrbDomain: "dolibarr-v23.orb.local", CustomDomains: []string{"doli23.local"}, HTTP: true},
-		{Name: "web", OrbDomain: "web.orb.local", HTTP: true},
-	}
-	m := newOrbstackPickerModel(containers, "example.test")
-
-	if got := m.sub.Value(); got != "doli23" {
-		t.Fatalf("initial subdomain = %q, want doli23 (custom domain label)", got)
-	}
-
-	m.move(1)
-	if m.cursor != 1 {
-		t.Fatalf("cursor = %d, want 1", m.cursor)
-	}
-	if got := m.sub.Value(); got != "web" {
-		t.Fatalf("subdomain after move = %q, want web", got)
-	}
-	if m.selected().Name != "web" {
-		t.Fatalf("selected = %q, want web", m.selected().Name)
-	}
-
-	m.move(1) // past the end: no-op
-	if m.cursor != 1 {
-		t.Fatalf("cursor should stay at 1, got %d", m.cursor)
-	}
-
-	view := m.View()
-	for _, want := range []string{"dolibarr-v23", "web.orb.local", "https://web.example.test"} {
-		if !strings.Contains(view.Content, want) {
-			t.Fatalf("picker view missing %q:\n%s", want, view.Content)
-		}
-	}
-}

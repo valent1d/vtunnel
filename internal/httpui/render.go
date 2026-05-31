@@ -21,27 +21,29 @@ func (m Model) View() tea.View {
 		return tea.NewView("")
 	}
 	return tea.View{AltScreen: true, Content: Render(Snapshot{
-		Routes:        m.routes,
-		Logs:          m.logs,
-		Selected:      m.selected,
-		LogCursor:     m.logCursor,
-		Focus:         m.focus,
-		Mode:          m.mode,
-		CreateStep:    m.createStep,
-		PortInput:     m.portInput.View(),
-		SubInput:      m.subInput.View(),
-		DomainInput:   m.domainInput.View(),
-		Notice:        m.notice,
-		Error:         m.err,
-		Width:         m.width,
-		Height:        m.height,
-		SelectedRoute: selectedRoute(m.routes, m.selected),
-		ConfirmCancel: m.confirmCancel,
-		HelpExpanded:  m.helpExpanded,
-		Edge:          m.edge,
-		Detail:        m.detail,
-		DetailErr:     m.detailErr,
+		Routes:             m.routes,
+		Logs:               m.logs,
+		Selected:           m.selected,
+		LogCursor:          m.logCursor,
+		Focus:              m.focus,
+		Mode:               m.mode,
+		CreateStep:         m.createStep,
+		PortInput:          m.portInput.View(),
+		SubInput:           m.subInput.View(),
+		DomainInput:        m.domainInput.View(),
+		Notice:             m.notice,
+		Error:              m.err,
+		Width:              m.width,
+		Height:             m.height,
+		SelectedRoute:      selectedRoute(m.routes, m.selected),
+		ConfirmCancel:      m.confirmCancel,
+		HelpExpanded:       m.helpExpanded,
+		Edge:               m.edge,
+		Detail:             m.detail,
+		DetailErr:          m.detailErr,
 		CreateProtectLabel: accessModeLabel[m.createProtect],
+		CreateRows:         m.createRows(),
+		OrbErr:             m.orbErr,
 		AccessModes:        m.accessModes,
 		AccessMode:         m.accessMode,
 		AccessField:        m.accessFocus,
@@ -58,28 +60,30 @@ func (m Model) View() tea.View {
 }
 
 type Snapshot struct {
-	Routes        []routes.Route
-	Logs          []requestlog.Entry
-	Selected      int
-	LogCursor     int
-	Focus         focus
-	Mode          mode
-	CreateStep    int
-	PortInput     string
-	SubInput      string
-	DomainInput   string
-	Notice        string
-	Error         string
-	Width         int
-	Height        int
-	SelectedRoute routes.Route
-	ConfirmCancel bool
-	HelpExpanded  bool
-	Edge          cloudflared.EdgeStatus
-	Now           time.Time
-	Detail        *requestlog.Exchange
-	DetailErr     string
+	Routes             []routes.Route
+	Logs               []requestlog.Entry
+	Selected           int
+	LogCursor          int
+	Focus              focus
+	Mode               mode
+	CreateStep         int
+	PortInput          string
+	SubInput           string
+	DomainInput        string
+	Notice             string
+	Error              string
+	Width              int
+	Height             int
+	SelectedRoute      routes.Route
+	ConfirmCancel      bool
+	HelpExpanded       bool
+	Edge               cloudflared.EdgeStatus
+	Now                time.Time
+	Detail             *requestlog.Exchange
+	DetailErr          string
 	CreateProtectLabel string
+	CreateRows         []CreateRow
+	OrbErr             string
 	AccessModes        []string
 	AccessMode         int
 	AccessField        int
@@ -297,7 +301,7 @@ func renderAccess(info *routes.AccessInfo, width int) string {
 // the container, its image, and any custom domains. Kept to two lines so it
 // barely costs vertical space in the right pane.
 func renderOrbStack(info *routes.OrbstackInfo, width int) string {
-	body := commandStyle.Render(orbstackBadge+" "+info.Container)
+	body := commandStyle.Render(orbstackBadge + " " + info.Container)
 	if info.Image != "" {
 		body += mutedStyle.Render("  ·  " + info.Image)
 	}
@@ -389,21 +393,29 @@ func renderLogs(snapshot Snapshot, width int, rows int) string {
 	return renderBox(title, strings.Join(padRows(lines, rows), "\n"), width)
 }
 
+// CreateRow is one rendered row of the create modal, derived by the model from
+// the active field list.
+type CreateRow struct {
+	Label    string
+	Value    string
+	Active   bool
+	Selector bool // a ◂/▸ chooser (source, container, protection) rather than a text input
+}
+
 func renderCreateForm(snapshot Snapshot, width int) string {
-	protectValue := snapshot.CreateProtectLabel
-	if snapshot.CreateStep == 3 {
-		protectValue = commandStyle.Render("◂ "+protectValue+" ▸")
-	} else {
-		protectValue = mutedStyle.Render(protectValue)
+	rows := make([]string, 0, len(snapshot.CreateRows)+3)
+	for _, row := range snapshot.CreateRows {
+		value := row.Value
+		if row.Selector {
+			if row.Active {
+				value = commandStyle.Render("◂ " + row.Value + " ▸")
+			} else {
+				value = mutedStyle.Render(row.Value)
+			}
+		}
+		rows = append(rows, createRow(row.Label, value, row.Active))
 	}
-	rows := []string{
-		createRow("Port", snapshot.PortInput, snapshot.CreateStep == 0),
-		createRow("Subdomain", snapshot.SubInput, snapshot.CreateStep == 1),
-		createRow("Domain", snapshot.DomainInput, snapshot.CreateStep == 2),
-		createRow("Protect", protectValue, snapshot.CreateStep == 3),
-		"",
-		mutedStyle.Render("enter next/create   tab move   ◂/▸ protection   esc cancel"),
-	}
+	rows = append(rows, "", mutedStyle.Render("enter next/create   tab move   ◂/▸ choose   esc cancel"))
 	return renderBox("New tunnel", strings.Join(rows, "\n"), width)
 }
 

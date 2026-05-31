@@ -138,7 +138,7 @@ func TestModelCreateRoute(t *testing.T) {
 	cfg := config.Default()
 	cfg.DefaultDomain = "example.test"
 	client := &fakeClient{}
-	model := NewModel(client, cfg, "", nil)
+	model := NewModel(client, cfg, "", nil, nil, Options{})
 	model.mode = modeCreate
 	model.createStep = 3 // last step (protect selector) → enter creates
 	model.portInput.SetValue("3000")
@@ -164,6 +164,93 @@ func TestModelCreateRoute(t *testing.T) {
 	}
 }
 
+type fakeOrbProvider struct {
+	containers []OrbContainer
+	err        error
+}
+
+func (f fakeOrbProvider) List(context.Context) ([]OrbContainer, error) {
+	return f.containers, f.err
+}
+
+func TestOrbstackProviderPopulatesContainers(t *testing.T) {
+	provider := fakeOrbProvider{containers: []OrbContainer{{Name: "doli23", DefaultSubdomain: "doli23"}}}
+	model := NewModel(&fakeClient{}, config.Default(), "", nil, provider, Options{})
+	msg := model.fetchContainers()()
+	updated, _ := model.Update(msg)
+	model = updated.(Model)
+	if !model.orbstackEnabled() {
+		t.Fatal("orbstack should be enabled after containers load")
+	}
+}
+
+func TestModelCreateOrbstackRoute(t *testing.T) {
+	cfg := config.Default()
+	cfg.DefaultDomain = "example.test"
+	client := &fakeClient{}
+	model := NewModel(client, cfg, "", nil, fakeOrbProvider{}, Options{})
+
+	// Containers loaded.
+	updated, _ := model.Update(containersMsg{containers: []OrbContainer{
+		{Name: "doli23", Image: "dolibarr", OrbDomain: "doli23.orb.local", Target: "http://doli23.orb.local", DefaultSubdomain: "doli23"},
+		{Name: "web", OrbDomain: "web.orb.local", Target: "http://web.orb.local", DefaultSubdomain: "web"},
+	}})
+	model = updated.(Model)
+
+	// Open create — the Source selector is first when containers exist.
+	updated, _ = model.Update(press("n"))
+	model = updated.(Model)
+	if fields := model.createFields(); fields[0] != fSource {
+		t.Fatalf("first field = %v, want fSource", fields[0])
+	}
+
+	// Switch source to OrbStack — subdomain prefills from the first container.
+	updated, _ = model.Update(press("right"))
+	model = updated.(Model)
+	if model.createSource != srcOrbstack {
+		t.Fatal("source should be OrbStack after right")
+	}
+	if model.subInput.Value() != "doli23" {
+		t.Fatalf("subdomain = %q, want prefilled doli23", model.subInput.Value())
+	}
+
+	// Jump to the last field and submit.
+	model.createStep = len(model.createFields()) - 1
+	updated, cmd := model.Update(press("enter"))
+	if cmd == nil {
+		t.Fatal("expected a create command")
+	}
+	model = updated.(Model)
+	updated, _ = model.Update(cmd())
+	model = updated.(Model)
+
+	if len(client.routes) != 1 {
+		t.Fatalf("routes = %#v", client.routes)
+	}
+	route := client.routes[0]
+	if route.Hostname != "doli23.example.test" {
+		t.Fatalf("hostname = %q, want doli23.example.test", route.Hostname)
+	}
+	if route.Target != "http://doli23.orb.local" {
+		t.Fatalf("target = %q, want the container's orb domain", route.Target)
+	}
+	if route.Orbstack == nil || route.Orbstack.Container != "doli23" {
+		t.Fatalf("orbstack info = %#v, want container doli23", route.Orbstack)
+	}
+}
+
+func TestOpenCreateOrbstackOption(t *testing.T) {
+	model := NewModel(&fakeClient{}, config.Default(), "", nil, fakeOrbProvider{}, Options{OpenCreateOrbstack: true})
+	updated, _ := model.Update(containersMsg{containers: []OrbContainer{{Name: "doli23", DefaultSubdomain: "doli23"}}})
+	model = updated.(Model)
+	if model.mode != modeCreate {
+		t.Fatal("create modal should open once containers load")
+	}
+	if model.createSource != srcOrbstack {
+		t.Fatal("create modal should open on the OrbStack source")
+	}
+}
+
 func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 	cfg := config.Default()
 	client := &fakeClient{
@@ -178,7 +265,7 @@ func TestModelScrollsLogsAndOpensRequestDetail(t *testing.T) {
 			Path:     fmt.Sprintf("/%d", index),
 		})
 	}
-	model := NewModel(client, cfg, "web.example.test", nil)
+	model := NewModel(client, cfg, "web.example.test", nil, nil, Options{})
 	model.routes = client.routes
 	model.syncSelection()
 	model.logs = client.logs
@@ -216,7 +303,7 @@ func TestModelFetchesExchangeDetailAndReplays(t *testing.T) {
 			},
 		},
 	}
-	model := NewModel(client, cfg, "web.example.test", nil)
+	model := NewModel(client, cfg, "web.example.test", nil, nil, Options{})
 	model.routes = client.routes
 	model.syncSelection()
 	model.logs = client.logs
@@ -268,7 +355,7 @@ func TestLogScrollMovesPastVisibleWindow(t *testing.T) {
 			ID: uint64(i + 1), Hostname: "web.example.test", Method: "GET", Status: 200, Path: fmt.Sprintf("/p%d", i),
 		})
 	}
-	model := NewModel(client, cfg, "web.example.test", nil)
+	model := NewModel(client, cfg, "web.example.test", nil, nil, Options{})
 	model.routes = client.routes
 	model.syncSelection()
 	model.logs = client.logs
@@ -347,7 +434,7 @@ func TestAccessPanelProtectsSelectedRoute(t *testing.T) {
 	cfg := config.Default()
 	client := &fakeClient{routes: []routes.Route{{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}}}
 	access := &fakeAccess{}
-	model := NewModel(client, cfg, "web.example.test", access)
+	model := NewModel(client, cfg, "web.example.test", access, nil, Options{})
 	model.routes = client.routes
 	model.syncSelection()
 	model.focus = focusTunnels
@@ -392,7 +479,7 @@ func TestAccessPanelProtectsViaSSOWithoutEmail(t *testing.T) {
 	cfg := config.Default()
 	client := &fakeClient{routes: []routes.Route{{Hostname: "web.example.test", Target: "http://127.0.0.1:3000"}}}
 	access := &fakeAccess{idps: []string{"VLTN Connect"}}
-	model := NewModel(client, cfg, "web.example.test", access)
+	model := NewModel(client, cfg, "web.example.test", access, nil, Options{})
 	model.routes = client.routes
 	model.syncSelection()
 	model.focus = focusTunnels

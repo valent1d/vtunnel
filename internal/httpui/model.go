@@ -80,6 +80,46 @@ type client interface {
 	ReplayRequest(context.Context, uint64) error
 }
 
+// OrbContainer is an OrbStack container the dashboard can expose.
+type OrbContainer struct {
+	Name             string
+	Image            string
+	OrbDomain        string
+	CustomDomains    []string
+	Target           string // proxy upstream, e.g. http://name.orb.local
+	DefaultSubdomain string
+}
+
+// OrbstackProvider lists HTTP-exposable OrbStack containers. The CLI injects the
+// implementation so httpui stays free of the OrbStack/Docker plumbing; it is nil
+// when OrbStack isn't available.
+type OrbstackProvider interface {
+	List(ctx context.Context) ([]OrbContainer, error)
+}
+
+// Options tweak the dashboard's initial state.
+type Options struct {
+	// OpenCreateOrbstack opens the create modal on the OrbStack source once
+	// containers have loaded (used by `vtunnel orbstack`).
+	OpenCreateOrbstack bool
+}
+
+type createField int
+
+const (
+	fSource createField = iota
+	fPort
+	fContainer
+	fSub
+	fDomain
+	fProtect
+)
+
+const (
+	srcClassic  = 0
+	srcOrbstack = 1
+)
+
 type Model struct {
 	client client
 	cfg    config.Config
@@ -99,9 +139,16 @@ type Model struct {
 	mode          mode
 	createStep    int
 	createProtect string // protection mode key chosen in the create flow ("public" = none)
+	createSource  int    // srcClassic or srcOrbstack
 	portInput     textinput.Model
 	subInput      textinput.Model
 	domainInput   textinput.Model
+
+	orbstack         OrbstackProvider
+	orbContainers    []OrbContainer
+	orbCursor        int
+	orbErr           string
+	pendingOrbCreate bool // open the create modal in OrbStack mode once containers load
 
 	access             AccessController
 	accessModes        []string // available mode keys in panel order (public/sso/otp)
@@ -181,16 +228,16 @@ type replayMsg struct {
 
 type tickMsg time.Time
 
-func Run(ctx context.Context, cfg config.Config, selectedHostname string, access AccessController) error {
+func Run(ctx context.Context, cfg config.Config, selectedHostname string, access AccessController, orbstack OrbstackProvider, opts Options) error {
 	program := tea.NewProgram(
-		NewModel(api.New(cfg), cfg, selectedHostname, access),
+		NewModel(api.New(cfg), cfg, selectedHostname, access, orbstack, opts),
 		tea.WithContext(ctx),
 	)
 	_, err := program.Run()
 	return err
 }
 
-func NewModel(client client, cfg config.Config, selectedHostname string, access AccessController) Model {
+func NewModel(client client, cfg config.Config, selectedHostname string, access AccessController, orbstack OrbstackProvider, opts Options) Model {
 	portInput := textinput.New()
 	portInput.Placeholder = "3000"
 	portInput.CharLimit = 5
@@ -215,6 +262,8 @@ func NewModel(client client, cfg config.Config, selectedHostname string, access 
 		client:           client,
 		cfg:              cfg,
 		access:           access,
+		orbstack:         orbstack,
+		pendingOrbCreate: opts.OpenCreateOrbstack,
 		selectedHostname: routes.NormalizeHostname(selectedHostname),
 		width:            100,
 		height:           30,
@@ -227,7 +276,26 @@ func NewModel(client client, cfg config.Config, selectedHostname string, access 
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchRoutes(), m.fetchEdge(), m.fetchAccessIdPs(), m.tick())
+	cmds := []tea.Cmd{m.fetchRoutes(), m.fetchEdge(), m.fetchAccessIdPs(), m.tick()}
+	if m.orbstack != nil {
+		cmds = append(cmds, m.fetchContainers())
+	}
+	return tea.Batch(cmds...)
+}
+
+type containersMsg struct {
+	containers []OrbContainer
+	err        error
+}
+
+func (m Model) fetchContainers() tea.Cmd {
+	provider := m.orbstack
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		containers, err := provider.List(ctx)
+		return containersMsg{containers: containers, err: err}
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -302,6 +370,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = modeDashboard
 		}
 		return m, m.fetchRoutes()
+	case containersMsg:
+		if msg.err != nil {
+			m.orbErr = msg.err.Error()
+		} else {
+			m.orbContainers = msg.containers
+			m.orbCursor = clamp(m.orbCursor, 0, max(0, len(m.orbContainers)-1))
+		}
+		// `vtunnel orbstack`: open the create modal on the OrbStack source now
+		// that containers are known.
+		if m.pendingOrbCreate {
+			m.pendingOrbCreate = false
+			if len(m.orbContainers) > 0 {
+				m.enterCreate(srcOrbstack)
+				return m, textinput.Blink
+			}
+			m.notice = "No HTTP-exposable OrbStack containers found."
+		}
+		return m, nil
 	case exchangeMsg:
 		// Ignore a stale fetch if the user already closed/changed the detail.
 		if m.mode != modeRequestDetail {
@@ -393,14 +479,8 @@ func (m Model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Refresh):
 		return m, m.fetchRoutes()
 	case key.Matches(msg, keys.New):
-		m.mode = modeCreate
-		m.createStep = 0
-		m.createProtect = "public"
-		m.portInput.SetValue("")
-		m.subInput.SetValue("")
-		m.domainInput.SetValue(defaultDomain(m.cfg))
-		m.focusCreateInput()
-		return m, nil
+		m.enterCreate(srcClassic)
+		return m, textinput.Blink
 	case key.Matches(msg, keys.Access):
 		if m.currentHostname() == "" || m.access == nil {
 			return m, nil
@@ -474,30 +554,45 @@ func (m *Model) moveCursor(delta int) {
 }
 
 func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	fields := m.createFields()
+	m.createStep = clamp(m.createStep, 0, len(fields)-1)
+	field := fields[m.createStep]
 	switch msg.String() {
 	case "esc":
 		m.mode = modeDashboard
 		return m, nil
-	case "tab", "down":
-		m.createStep = clamp(m.createStep+1, 0, 3)
+	case "tab":
+		m.createStep = clamp(m.createStep+1, 0, len(fields)-1)
 		m.focusCreateInput()
 		return m, nil
-	case "shift+tab", "up":
-		m.createStep = clamp(m.createStep-1, 0, 3)
+	case "shift+tab":
+		m.createStep = clamp(m.createStep-1, 0, len(fields)-1)
+		m.focusCreateInput()
+		return m, nil
+	case "down":
+		if field == fContainer {
+			m.moveContainer(1)
+			return m, nil
+		}
+		m.createStep = clamp(m.createStep+1, 0, len(fields)-1)
+		m.focusCreateInput()
+		return m, nil
+	case "up":
+		if field == fContainer {
+			m.moveContainer(-1)
+			return m, nil
+		}
+		m.createStep = clamp(m.createStep-1, 0, len(fields)-1)
 		m.focusCreateInput()
 		return m, nil
 	case "left":
-		if m.createStep == 3 {
-			m.createProtect = cycleMode(m.createProtect, -1, len(m.accessIdPs) > 0)
-		}
+		m.adjustField(field, -1)
 		return m, nil
 	case "right":
-		if m.createStep == 3 {
-			m.createProtect = cycleMode(m.createProtect, 1, len(m.accessIdPs) > 0)
-		}
+		m.adjustField(field, 1)
 		return m, nil
 	case "enter":
-		if m.createStep < 3 {
+		if m.createStep < len(fields)-1 {
 			m.createStep++
 			m.focusCreateInput()
 			return m, nil
@@ -510,15 +605,91 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.addRoute(route)
 	}
 	var cmd tea.Cmd
-	switch m.createStep {
-	case 0:
+	switch field {
+	case fPort:
 		m.portInput, cmd = m.portInput.Update(msg)
-	case 1:
+	case fSub:
 		m.subInput, cmd = m.subInput.Update(msg)
-	case 2:
+	case fDomain:
 		m.domainInput, cmd = m.domainInput.Update(msg)
 	}
 	return m, cmd
+}
+
+// enterCreate opens the create modal with the given source preselected.
+func (m *Model) enterCreate(source int) {
+	m.mode = modeCreate
+	m.createStep = 0
+	m.createProtect = "public"
+	m.createSource = source
+	if !m.orbstackEnabled() {
+		m.createSource = srcClassic
+	}
+	m.portInput.SetValue("")
+	m.subInput.SetValue("")
+	m.domainInput.SetValue(defaultDomain(m.cfg))
+	if m.createSource == srcOrbstack {
+		m.prefillOrbSubdomain()
+	}
+	m.err = ""
+	m.focusCreateInput()
+}
+
+func (m Model) orbstackEnabled() bool { return len(m.orbContainers) > 0 }
+
+// createFields returns the ordered create-form fields for the current state: a
+// Source selector first (only when OrbStack containers exist), then either a
+// Port input (Classic) or a Container selector (OrbStack), then the shared
+// subdomain/domain/protection fields.
+func (m Model) createFields() []createField {
+	fields := make([]createField, 0, 5)
+	if m.orbstackEnabled() {
+		fields = append(fields, fSource)
+	}
+	if m.createSource == srcOrbstack && m.orbstackEnabled() {
+		fields = append(fields, fContainer)
+	} else {
+		fields = append(fields, fPort)
+	}
+	return append(fields, fSub, fDomain, fProtect)
+}
+
+func (m Model) selectedContainer() (OrbContainer, bool) {
+	if len(m.orbContainers) == 0 {
+		return OrbContainer{}, false
+	}
+	return m.orbContainers[clamp(m.orbCursor, 0, len(m.orbContainers)-1)], true
+}
+
+func (m *Model) prefillOrbSubdomain() {
+	if c, ok := m.selectedContainer(); ok {
+		m.subInput.SetValue(c.DefaultSubdomain)
+	}
+}
+
+func (m *Model) moveContainer(delta int) {
+	if len(m.orbContainers) == 0 {
+		return
+	}
+	m.orbCursor = clamp(m.orbCursor+delta, 0, len(m.orbContainers)-1)
+	m.prefillOrbSubdomain()
+}
+
+func (m *Model) adjustField(field createField, delta int) {
+	switch field {
+	case fSource:
+		if m.orbstackEnabled() {
+			m.createSource = clamp(m.createSource+delta, srcClassic, srcOrbstack)
+			if m.createSource == srcOrbstack {
+				m.prefillOrbSubdomain()
+			}
+			m.focusCreateInput()
+		}
+	case fContainer:
+		m.moveContainer(delta)
+	case fProtect:
+		m.createProtect = cycleMode(m.createProtect, delta, len(m.accessIdPs) > 0)
+	}
 }
 
 func (m Model) updateConfirmStop(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -598,14 +769,17 @@ func (m *Model) focusCreateInput() {
 	m.portInput.Blur()
 	m.subInput.Blur()
 	m.domainInput.Blur()
-	switch m.createStep {
-	case 0:
+	fields := m.createFields()
+	if m.createStep < 0 || m.createStep >= len(fields) {
+		return
+	}
+	switch fields[m.createStep] {
+	case fPort:
 		m.portInput.Focus()
-	case 1:
+	case fSub:
 		m.subInput.Focus()
-	case 2:
+	case fDomain:
 		m.domainInput.Focus()
-		// step 3 = protect selector, no text input focused
 	}
 }
 
@@ -626,6 +800,30 @@ func (m Model) currentHostname() string {
 }
 
 func (m Model) createRoute() (routes.Route, error) {
+	if m.createSource == srcOrbstack {
+		container, ok := m.selectedContainer()
+		if !ok {
+			return routes.Route{}, fmt.Errorf("no OrbStack container selected")
+		}
+		sub := strings.TrimSpace(m.subInput.Value())
+		if sub == "" {
+			sub = container.DefaultSubdomain
+		}
+		host, err := hostnameForCreate(sub, m.domainInput.Value(), m.cfg)
+		if err != nil {
+			return routes.Route{}, err
+		}
+		return routes.Route{
+			Hostname: host,
+			Target:   container.Target,
+			Orbstack: &routes.OrbstackInfo{
+				Container:     container.Name,
+				Image:         container.Image,
+				OrbDomain:     container.OrbDomain,
+				CustomDomains: container.CustomDomains,
+			},
+		}, nil
+	}
 	port, err := normalizePort(m.portInput.Value())
 	if err != nil {
 		return routes.Route{}, err
@@ -635,6 +833,47 @@ func (m Model) createRoute() (routes.Route, error) {
 		return routes.Route{}, err
 	}
 	return routes.Route{Hostname: host, Target: "http://127.0.0.1:" + port}, nil
+}
+
+// createRows builds the create-modal rows for the renderer from the active field
+// list, so the view never has to re-derive the field ordering.
+func (m Model) createRows() []CreateRow {
+	fields := m.createFields()
+	rows := make([]CreateRow, 0, len(fields))
+	for i, field := range fields {
+		row := CreateRow{Active: i == m.createStep}
+		switch field {
+		case fSource:
+			row.Label, row.Value, row.Selector = "Source", sourceLabel(m.createSource), true
+		case fPort:
+			row.Label, row.Value = "Port", m.portInput.View()
+		case fContainer:
+			row.Label, row.Value, row.Selector = "Container", m.containerValue(), true
+		case fSub:
+			row.Label, row.Value = "Subdomain", m.subInput.View()
+		case fDomain:
+			row.Label, row.Value = "Domain", m.domainInput.View()
+		case fProtect:
+			row.Label, row.Value, row.Selector = "Protect", accessModeLabel[m.createProtect], true
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func sourceLabel(source int) string {
+	if source == srcOrbstack {
+		return "OrbStack"
+	}
+	return "Classic"
+}
+
+func (m Model) containerValue() string {
+	c, ok := m.selectedContainer()
+	if !ok {
+		return "(no containers)"
+	}
+	return fmt.Sprintf("%s  (%d/%d)", c.Name, clamp(m.orbCursor, 0, len(m.orbContainers)-1)+1, len(m.orbContainers))
 }
 
 func (m Model) fetchRoutes() tea.Cmd {

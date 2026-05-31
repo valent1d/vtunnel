@@ -549,7 +549,7 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 				if err := ensureDaemon(cmd.Context(), cfg, *configPath); err != nil {
 					return err
 				}
-				return runHTTPUI(cmd.Context(), cfg, "", accessControllerFor(cfg))
+				return runHTTPUI(cmd.Context(), cfg, "", accessControllerFor(cfg), orbstackProvider(), httpui.Options{})
 			}
 
 			var routeTarget, subdomain string
@@ -619,7 +619,7 @@ func newHTTPCommand(configPath *string) *cobra.Command {
 			if detach {
 				return nil
 			}
-			return runHTTPUI(cmd.Context(), cfg, hostname, accessControllerFor(cfg))
+			return runHTTPUI(cmd.Context(), cfg, hostname, accessControllerFor(cfg), orbstackProvider(), httpui.Options{})
 		},
 	}
 	cmd.Flags().StringVar(&domain, "domain", "", "domain to use for this route")
