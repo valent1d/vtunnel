@@ -392,7 +392,7 @@ func TestUninstallDryRunKeepsCloudflareAndChangesNothing(t *testing.T) {
 	}
 	for _, want := range []string{
 		"vtunnel uninstall will remove:",
-		"macOS LaunchAgents",
+		serviceMechanism(),
 		"Cloudflare account resources: kept (pass --cloudflare",
 		"Dry run — nothing was removed.",
 	} {
@@ -1396,7 +1396,7 @@ func TestCloudflareAuthVerifiesUserTokenWithoutAccountHint(t *testing.T) {
 		t.Fatalf("stored token = %q, want test-token", storedToken)
 	}
 	for _, want := range []string{
-		"Stored Cloudflare API token in macOS Keychain.",
+		"Stored Cloudflare API token in " + secretStoreName() + ".",
 		"Token status: active",
 	} {
 		if !strings.Contains(out, want) {

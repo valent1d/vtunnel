@@ -775,10 +775,27 @@ func maxLogID(logs []requestlog.Entry) uint64 {
 }
 
 func copyToClipboard(value string) error {
-	if runtime.GOOS != "darwin" {
-		return fmt.Errorf("clipboard is only implemented on macOS for now")
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	default:
+		switch {
+		case clipboardToolAvailable("xclip"):
+			cmd = exec.Command("xclip", "-selection", "clipboard")
+		case clipboardToolAvailable("xsel"):
+			cmd = exec.Command("xsel", "--clipboard", "--input")
+		case clipboardToolAvailable("wl-copy"):
+			cmd = exec.Command("wl-copy")
+		default:
+			return fmt.Errorf("no clipboard tool found (install xclip, xsel, or wl-clipboard)")
+		}
 	}
-	cmd := exec.Command("pbcopy")
 	cmd.Stdin = bytes.NewBufferString(value)
 	return cmd.Run()
+}
+
+func clipboardToolAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }

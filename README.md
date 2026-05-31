@@ -39,11 +39,21 @@ Cloudflare and `cloudflared` are configured **once** with a wildcard ingress rul
 
 ## Quick start
 
-**1. Install** (macOS, via the Homebrew tap):
+**1. Install.**
+
+On **macOS**, the Homebrew tap is recommended:
 
 ```bash
 brew install valent1d/vtunnel/vtunnel
 ```
+
+On **Linux** (or macOS without Homebrew), use the install script — it detects your OS/arch, verifies the checksum, and installs the binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/valent1d/vtunnel/develop/install.sh | sh
+```
+
+(vtunnel needs `cloudflared` installed too — `brew install cloudflared` on macOS, or your distro's package / [Cloudflare's downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) on Linux.)
 
 **2. Run the guided setup:**
 
@@ -360,7 +370,16 @@ For safety, the local proxy and API must stay bound to `127.0.0.1`.
 
 ## Platform support
 
-`vtunnel` is built and tested on **macOS**: installation (Homebrew tap), background services (LaunchAgents), and token storage (Keychain) target macOS first. The core — the proxy, daemon, routing, and request logs — is portable, so Linux works for the daily flow, but service installation and Keychain integration are macOS-only for now.
+`vtunnel` runs on **macOS and Linux**. Each platform-specific piece has a native backend:
+
+| | macOS | Linux |
+|---|---|---|
+| Install | Homebrew tap | `install.sh` (curl) |
+| Background services | LaunchAgents (`launchctl`) | systemd user services (`systemctl --user`) |
+| Token storage | Keychain | `0600` file in the config dir |
+| Clipboard / open URL | `pbcopy` / `open` | `xclip`/`xsel`/`wl-copy` / `xdg-open` |
+
+The core — proxy, daemon, routing, request logs, MCP server — is shared. OrbStack container discovery remains macOS-only (OrbStack is Mac-only; use the Docker daemon directly on Linux for now). On headless Linux, `systemctl --user` may need `loginctl enable-linger <user>` so services run without an active session.
 
 ## Built with
 

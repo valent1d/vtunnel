@@ -36,6 +36,8 @@ import (
 	"vtunnel/internal/requestlog"
 	"vtunnel/internal/routes"
 	"vtunnel/internal/secrets"
+	"vtunnel/internal/service"
+	"vtunnel/internal/systemd"
 	"vtunnel/internal/uninstall"
 )
 
@@ -316,7 +318,7 @@ func newCloudflareAuthCommand() *cobra.Command {
 			}
 			storedToken, err := readCloudflareTokenFromKeychain()
 			if err != nil {
-				return fmt.Errorf("read stored token from macOS Keychain: %w", err)
+				return fmt.Errorf("read stored token from %s: %w", secretStoreName(), err)
 			}
 			if storedToken != token {
 				return errors.New("stored token readback mismatch")
@@ -326,9 +328,9 @@ func newCloudflareAuthCommand() *cobra.Command {
 				return err
 			}
 			if _, err := storedClient.VerifyToken(cmd.Context()); err != nil {
-				return fmt.Errorf("verify stored token from macOS Keychain: %w", err)
+				return fmt.Errorf("verify stored token from %s: %w", secretStoreName(), err)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "Stored Cloudflare API token in macOS Keychain.")
+			fmt.Fprintf(cmd.OutOrStdout(), "Stored Cloudflare API token in %s.\n", secretStoreName())
 			if status.Status != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "Token status: %s\n", status.Status)
 			}
@@ -430,7 +432,7 @@ func newCloudflareClientFromKeychain() (*cfapi.Client, string, error) {
 		return nil, "", err
 	}
 	client, err := newCloudflareClientWithEnvOptions(token)
-	return client, "macOS Keychain", err
+	return client, secretStoreName(), err
 }
 
 var readCloudflareTokenFromKeychain = func() (string, error) {
@@ -494,7 +496,24 @@ func cloudflareTokenTemplateURL(includeAccessWrite bool) string {
 }
 
 func openURL(rawURL string) error {
-	return exec.Command("open", rawURL).Start()
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", rawURL).Start()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL).Start()
+	default:
+		for _, opener := range []string{"xdg-open", "gio", "gnome-open", "kde-open"} {
+			path, err := exec.LookPath(opener)
+			if err != nil {
+				continue
+			}
+			if opener == "gio" {
+				return exec.Command(path, "open", rawURL).Start()
+			}
+			return exec.Command(path, rawURL).Start()
+		}
+		return fmt.Errorf("no URL opener found (install xdg-open)")
+	}
 }
 
 func newHTTPCommand(configPath *string) *cobra.Command {
@@ -940,7 +959,7 @@ func newOnboardingCommand(configPath *string) *cobra.Command {
 func newServiceCommand(configPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "service",
-		Short: "Install and manage macOS user services",
+		Short: "Install and manage vtunnel's user services (launchd on macOS, systemd on Linux)",
 	}
 	cmd.AddCommand(
 		newServiceInstallCommand(configPath),
@@ -959,7 +978,7 @@ func newServiceInstallCommand(configPath *string) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "Install vtunnel and cloudflared as macOS LaunchAgents",
+		Short: "Install vtunnel and cloudflared as user services that start at login",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			manager, specs, err := serviceInstallContext(*configPath, vtunnelBin, cloudflaredBin)
 			if err != nil {
@@ -979,16 +998,16 @@ func newServiceInstallCommand(configPath *string) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&vtunnelBin, "vtunnel-bin", "", "vtunnel binary path to use in the LaunchAgent")
-	cmd.Flags().StringVar(&cloudflaredBin, "cloudflared-bin", "", "cloudflared binary path to use in the LaunchAgent")
-	cmd.Flags().BoolVar(&noStart, "no-start", false, "write LaunchAgents without starting them")
+	cmd.Flags().StringVar(&vtunnelBin, "vtunnel-bin", "", "vtunnel binary path to use in the service definition")
+	cmd.Flags().StringVar(&cloudflaredBin, "cloudflared-bin", "", "cloudflared binary path to use in the service definition")
+	cmd.Flags().BoolVar(&noStart, "no-start", false, "write the service definitions without starting them")
 	return cmd
 }
 
 func newServiceStatusCommand(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show macOS LaunchAgent status",
+		Short: "Show service status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			manager, specs, err := serviceRuntimeContext(*configPath)
 			if err != nil {
@@ -1016,7 +1035,7 @@ func newServiceStatusCommand(configPath *string) *cobra.Command {
 func newServiceStartCommand(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
-		Short: "Start installed macOS LaunchAgents",
+		Short: "Start the installed user services",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			manager, specs, err := serviceRuntimeContext(*configPath)
 			if err != nil {
@@ -1034,7 +1053,7 @@ func newServiceStartCommand(configPath *string) *cobra.Command {
 func newServiceStopCommand(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "Stop installed macOS LaunchAgents",
+		Short: "Stop the running user services",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			manager, specs, err := serviceRuntimeContext(*configPath)
 			if err != nil {
@@ -1058,7 +1077,7 @@ func newServiceStopCommand(configPath *string) *cobra.Command {
 func newServiceUninstallCommand(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "uninstall",
-		Short: "Stop and remove macOS LaunchAgents",
+		Short: "Stop and remove the user services",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			manager, specs, err := serviceRuntimeContext(*configPath)
 			if err != nil {
@@ -1077,7 +1096,7 @@ func newServiceUninstallCommand(configPath *string) *cobra.Command {
 // hooks reuse them instead of re-inspecting.
 type uninstallRuntime struct {
 	cfg       config.Config
-	manager   launchd.Manager
+	manager   service.Manager
 	specs     []launchd.Spec
 	cfClient  *cfapi.Client
 	accountID string
@@ -1092,8 +1111,8 @@ func newUninstallCommand(configPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Remove vtunnel services, local config, and optionally Cloudflare resources",
-		Long: "Tear down what vtunnel installed: macOS LaunchAgents, the local config\n" +
-			"directory and Keychain token, and — with --cloudflare — the Cloudflare\n" +
+		Long: "Tear down what vtunnel installed: the user services, the local config\n" +
+			"directory and stored token, and — with --cloudflare — the Cloudflare\n" +
 			"tunnel and wildcard DNS records it created. The vtunnel binary itself is\n" +
 			"removed separately with `brew uninstall vtunnel`.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -1171,7 +1190,7 @@ func buildUninstallPlan(ctx context.Context, configPath string, opts uninstall.O
 		plan.DaemonRunning = true
 	}
 
-	if runtime.GOOS == "darwin" {
+	if serviceOSSupported() {
 		if manager, specs, serr := serviceRuntimeContext(path); serr == nil {
 			rt.manager = manager
 			rt.specs = specs
@@ -1388,7 +1407,7 @@ func printUninstallPlan(out io.Writer, plan uninstall.Plan) {
 	fmt.Fprintln(out, "vtunnel uninstall will remove:")
 	fmt.Fprintln(out)
 
-	fmt.Fprintln(out, "  macOS LaunchAgents")
+	fmt.Fprintln(out, "  "+serviceMechanism())
 	installed := plan.InstalledServices()
 	if len(installed) == 0 {
 		fmt.Fprintln(out, "    (none installed)")
@@ -1414,7 +1433,7 @@ func printUninstallPlan(out io.Writer, plan uninstall.Plan) {
 			}
 		}
 		if plan.Token {
-			fmt.Fprintln(out, "    • Cloudflare API token (macOS Keychain)")
+			fmt.Fprintf(out, "    • Cloudflare API token (%s)\n", secretStoreName())
 			found = true
 		}
 		if !found {
@@ -1482,55 +1501,99 @@ func confirmPrompt(reader *bufio.Reader, out io.Writer, question string, default
 	return answer == "y" || answer == "yes"
 }
 
-func serviceInstallContext(configPath string, vtunnelBin string, cloudflaredBin string) (launchd.Manager, []launchd.Spec, error) {
-	if runtime.GOOS != "darwin" {
-		return launchd.Manager{}, nil, errors.New("vtunnel service install is currently supported on macOS only")
+// serviceOSSupported reports whether vtunnel can manage user services here.
+func serviceOSSupported() bool {
+	return runtime.GOOS == "darwin" || runtime.GOOS == "linux"
+}
+
+var errServiceOSUnsupported = errors.New("vtunnel services are supported on macOS and Linux only")
+
+// secretStoreName names where the Cloudflare token is stored, for user messages.
+func secretStoreName() string {
+	if runtime.GOOS == "darwin" {
+		return "macOS Keychain"
+	}
+	return "the local credentials file"
+}
+
+// serviceMechanism names the OS service mechanism, for user messages.
+func serviceMechanism() string {
+	if runtime.GOOS == "linux" {
+		return "systemd user services"
+	}
+	return "macOS LaunchAgents"
+}
+
+// newServiceManager returns the service backend for the current OS: launchd on
+// macOS, systemd --user on Linux.
+func newServiceManager() (service.Manager, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return launchd.New(launchdRunner)
+	case "linux":
+		return systemd.New(launchdRunner)
+	default:
+		return nil, errServiceOSUnsupported
+	}
+}
+
+func serviceInstallContext(configPath string, vtunnelBin string, cloudflaredBin string) (service.Manager, []launchd.Spec, error) {
+	if !serviceOSSupported() {
+		return nil, nil, errServiceOSUnsupported
 	}
 	if err := config.EnsureDirs(); err != nil {
-		return launchd.Manager{}, nil, err
+		return nil, nil, err
 	}
 	path, cfg, err := loadServiceConfig(configPath)
 	if err != nil {
-		return launchd.Manager{}, nil, err
+		return nil, nil, err
 	}
 	if vtunnelBin == "" {
 		vtunnelBin, err = resolveServiceBinary("vtunnel")
 		if err != nil {
-			return launchd.Manager{}, nil, err
+			return nil, nil, err
 		}
 	}
 	if cloudflaredBin == "" {
 		cloudflaredBin, err = resolveServiceBinary("cloudflared")
 		if err != nil {
-			return launchd.Manager{}, nil, err
+			return nil, nil, err
 		}
 	}
-	manager, err := launchd.New(launchdRunner)
+	manager, err := newServiceManager()
 	if err != nil {
-		return launchd.Manager{}, nil, err
+		return nil, nil, err
 	}
-	specs, err := serviceSpecs(manager.Home, cfg, path, vtunnelBin, cloudflaredBin)
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return launchd.Manager{}, nil, err
+		return nil, nil, err
+	}
+	specs, err := serviceSpecs(home, cfg, path, vtunnelBin, cloudflaredBin)
+	if err != nil {
+		return nil, nil, err
 	}
 	return manager, specs, nil
 }
 
-func serviceRuntimeContext(configPath string) (launchd.Manager, []launchd.Spec, error) {
-	if runtime.GOOS != "darwin" {
-		return launchd.Manager{}, nil, errors.New("vtunnel services are currently supported on macOS only")
+func serviceRuntimeContext(configPath string) (service.Manager, []launchd.Spec, error) {
+	if !serviceOSSupported() {
+		return nil, nil, errServiceOSUnsupported
 	}
 	path, cfg, err := loadServiceConfig(configPath)
 	if err != nil {
-		return launchd.Manager{}, nil, err
+		return nil, nil, err
 	}
-	manager, err := launchd.New(launchdRunner)
+	manager, err := newServiceManager()
 	if err != nil {
-		return launchd.Manager{}, nil, err
+		return nil, nil, err
 	}
-	specs, err := serviceSpecs(manager.Home, cfg, path, "vtunnel", "cloudflared")
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return launchd.Manager{}, nil, err
+		return nil, nil, err
+	}
+	specs, err := serviceSpecs(home, cfg, path, "vtunnel", "cloudflared")
+	if err != nil {
+		return nil, nil, err
 	}
 	return manager, specs, nil
 }
@@ -1595,9 +1658,9 @@ func resolveServiceBinary(name string) (string, error) {
 	return exe, nil
 }
 
-func printServicePaths(out io.Writer, manager launchd.Manager, specs []launchd.Spec) {
+func printServicePaths(out io.Writer, manager service.Manager, specs []launchd.Spec) {
 	for _, spec := range specs {
-		fmt.Fprintf(out, "  - %s: %s\n", spec.Name, manager.PlistPath(spec))
+		fmt.Fprintf(out, "  - %s: %s\n", spec.Name, manager.Path(spec))
 	}
 }
 
@@ -2240,7 +2303,7 @@ func inspectCloudflaredProcess(ctx context.Context, cloudflaredPath string, clou
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	output, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,command=").Output()
+	output, err := exec.CommandContext(ctx, "ps", psListArgs()...).Output()
 	if err != nil {
 		return cloudflaredProcessInspection{Err: err}
 	}
@@ -2257,6 +2320,15 @@ func inspectCloudflaredProcess(ctx context.Context, cloudflaredPath string, clou
 		}
 	}
 	return inspection
+}
+
+// psListArgs returns the `ps` arguments to list every process as "PID command".
+// macOS uses BSD ps (-axo); Linux/others use the POSIX form (-eo, args).
+func psListArgs() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"-axo", "pid=,command="}
+	}
+	return []string{"-eo", "pid=,args="}
 }
 
 func parseCloudflaredProcessLine(line string) (cloudflaredProcess, bool) {

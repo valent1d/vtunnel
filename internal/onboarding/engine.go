@@ -617,7 +617,7 @@ func welcomePhase() Phase {
 
 func localPhase(s snapshot) Phase {
 	checks := []Check{
-		check(runtime.GOOS == "darwin", StatusWarn, "OS", runtime.GOOS, "macOS is the first supported target"),
+		check(supportedOS(), StatusWarn, "OS", runtime.GOOS, "this OS is experimental; macOS and Linux are supported"),
 		check(s.configExists, StatusAction, "vtunnel config", s.configPath, "not found; vtunnel can create it"),
 		check(len(s.cfg.Domains) > 0, StatusAction, "vtunnel domains", strings.Join(s.cfg.Domains, ", "), "none configured"),
 	}
@@ -864,18 +864,31 @@ func runtimePhase(s snapshot) Phase {
 }
 
 func servicesPhase(s snapshot) Phase {
-	checks := []Check{
-		{Label: "macOS services", Status: StatusWarn, Detail: "run vtunnel service install after setup to start at login"},
-		{Label: "vtunnel daemon service", Status: StatusWarn, Detail: "managed by LaunchAgent sh.vltn.vtunnel.daemon"},
-		{Label: "cloudflared service", Status: StatusWarn, Detail: "managed by LaunchAgent sh.vltn.vtunnel.cloudflared"},
+	if !supportedOS() {
+		return Phase{
+			Title:   "Services",
+			Summary: "Install vtunnel and cloudflared as user services so they start at login.",
+			Checks:  []Check{{Label: "services", Status: StatusWarn, Detail: "automatic services aren't supported on this OS yet"}},
+		}
 	}
-	if runtime.GOOS != "darwin" {
-		checks = []Check{{Label: "services", Status: StatusWarn, Detail: "automatic services are currently macOS-first"}}
+	manager := "LaunchAgents"
+	if runtime.GOOS == "linux" {
+		manager = "systemd user services"
+	}
+	checks := []Check{
+		{Label: "login services", Status: StatusWarn, Detail: "run vtunnel service install after setup to start at login"},
+		{Label: "vtunnel daemon service", Status: StatusWarn, Detail: "managed via " + manager},
+		{Label: "cloudflared service", Status: StatusWarn, Detail: "managed via " + manager},
 	}
 	if reportReady(s) {
-		checks[0] = Check{Label: "macOS services", Status: StatusAction, Detail: "optional but recommended: vtunnel service install"}
+		checks[0] = Check{Label: "login services", Status: StatusAction, Detail: "optional but recommended: vtunnel service install"}
 	}
 	return Phase{Title: "Services", Summary: "Install vtunnel and cloudflared as user services so they start at login.", Checks: checks}
+}
+
+// supportedOS reports whether vtunnel has full support for the current OS.
+func supportedOS() bool {
+	return runtime.GOOS == "darwin" || runtime.GOOS == "linux"
 }
 
 func completionPhase(s snapshot) Phase {
@@ -1046,7 +1059,7 @@ func runtimeActions(s snapshot) []Action {
 }
 
 func serviceActions(s snapshot) []Action {
-	if runtime.GOOS != "darwin" {
+	if !supportedOS() {
 		return nil
 	}
 	return []Action{{ID: "service-install-manual", Label: "Install login services", Description: "Run this after setup to start vtunnel automatically at login.", Command: "vtunnel service install"}}
@@ -1551,7 +1564,11 @@ func extractCloudflaredVersion(output string) string {
 func InspectProcess(ctx context.Context, cloudflaredPath string, cloudflaredConfigPath string, tunnelRef string) ProcessInspection {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,command=").Output()
+	psArgs := []string{"-axo", "pid=,command="}
+	if runtime.GOOS != "darwin" {
+		psArgs = []string{"-eo", "pid=,args="}
+	}
+	output, err := exec.CommandContext(ctx, "ps", psArgs...).Output()
 	if err != nil {
 		return ProcessInspection{Err: err}
 	}

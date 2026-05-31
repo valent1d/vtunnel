@@ -6,47 +6,39 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
+
+	"vtunnel/internal/service"
 )
 
+const launchAgentsSubdir = "Library/LaunchAgents"
+
+// These alias the shared service types so existing launchd.X references keep
+// working, while the systemd backend shares the same Spec/Status/constructors.
 const (
-	VtunnelDaemonLabel = "sh.vltn.vtunnel.daemon"
-	CloudflaredLabel   = "sh.vltn.vtunnel.cloudflared"
-	DefaultPath        = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-	launchAgentsSubdir = "Library/LaunchAgents"
+	VtunnelDaemonLabel = service.DaemonLabel
+	CloudflaredLabel   = service.CloudflaredLabel
+	DefaultPath        = service.DefaultPath
 )
 
-type Runner func(context.Context, string, ...string) ([]byte, error)
+type (
+	Runner = service.Runner
+	Spec   = service.Spec
+	Status = service.Status
+)
+
+var ExecRunner = service.ExecRunner
+
+var (
+	VtunnelDaemonSpec = service.DaemonSpec
+	CloudflaredSpec   = service.CloudflaredSpec
+)
 
 type Manager struct {
 	Home   string
 	UID    int
 	Runner Runner
-}
-
-type Spec struct {
-	Name              string
-	Label             string
-	ProgramArguments  []string
-	StandardOutPath   string
-	StandardErrorPath string
-	WorkingDirectory  string
-	EnvironmentPath   string
-}
-
-type Status struct {
-	Spec   Spec
-	Path   string
-	Exists bool
-	Loaded bool
-	Output string
-	Err    error
-}
-
-func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
 func New(runner Runner) (Manager, error) {
@@ -65,30 +57,6 @@ func NewForTest(home string, uid int, runner Runner) Manager {
 		runner = ExecRunner
 	}
 	return Manager{Home: home, UID: uid, Runner: runner}
-}
-
-func VtunnelDaemonSpec(vtunnelPath string, configPath string, logsDir string, home string) Spec {
-	return Spec{
-		Name:              "vtunnel daemon",
-		Label:             VtunnelDaemonLabel,
-		ProgramArguments:  []string{vtunnelPath, "daemon", "--config", configPath},
-		StandardOutPath:   filepath.Join(logsDir, "daemon.launchd.out.log"),
-		StandardErrorPath: filepath.Join(logsDir, "daemon.launchd.err.log"),
-		WorkingDirectory:  home,
-		EnvironmentPath:   DefaultPath,
-	}
-}
-
-func CloudflaredSpec(cloudflaredPath string, configPath string, logsDir string, home string) Spec {
-	return Spec{
-		Name:              "cloudflared",
-		Label:             CloudflaredLabel,
-		ProgramArguments:  []string{cloudflaredPath, "--config", configPath, "tunnel", "run"},
-		StandardOutPath:   filepath.Join(logsDir, "cloudflared.launchd.out.log"),
-		StandardErrorPath: filepath.Join(logsDir, "cloudflared.launchd.err.log"),
-		WorkingDirectory:  home,
-		EnvironmentPath:   DefaultPath,
-	}
 }
 
 func (m Manager) Install(ctx context.Context, specs []Spec, start bool) error {
@@ -173,6 +141,9 @@ func (m Manager) Status(ctx context.Context, spec Spec) Status {
 func (m Manager) PlistPath(spec Spec) string {
 	return filepath.Join(m.Home, launchAgentsSubdir, spec.Label+".plist")
 }
+
+// Path implements service.Manager: the plist backing a spec.
+func (m Manager) Path(spec Spec) string { return m.PlistPath(spec) }
 
 func (m Manager) Domain() string {
 	return "gui/" + strconv.Itoa(m.UID)

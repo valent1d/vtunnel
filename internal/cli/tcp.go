@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -187,11 +186,11 @@ func applyTCPExpose(cmd *cobra.Command, cfg config.Config, configPath, hostname,
 	return nil
 }
 
-// reloadCloudflared restarts cloudflared so config changes take effect:
-// kickstart the LaunchAgent if installed, else restart the foreground process.
+// reloadCloudflared restarts cloudflared so config changes take effect: restart
+// the managed service (launchd/systemd) if installed, else the foreground process.
 func reloadCloudflared(ctx context.Context, cfg config.Config, configPath string) error {
 	cfPath := cloudflaredConfigPathFor(cfg)
-	if runtime.GOOS == "darwin" {
+	if serviceOSSupported() {
 		if manager, specs, err := serviceRuntimeContext(configPath); err == nil {
 			for _, spec := range specs {
 				if spec.Label == launchd.CloudflaredLabel && manager.Status(ctx, spec).Exists {
