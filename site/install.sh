@@ -86,10 +86,19 @@ resolve_version() {
 		printf '%s' "$VTUNNEL_VERSION"
 		return
 	fi
-	# First release in the list is the most recent (includes prereleases).
-	fetch "https://api.github.com/repos/${REPO}/releases" \
-		| grep -m1 '"tag_name"' \
-		| sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+	# The releases list isn't reliably ordered, so collect every tag and pick the
+	# highest by version sort. Prefer the latest stable release; if there are only
+	# prereleases (e.g. during beta), fall back to the highest prerelease.
+	tags="$(fetch "https://api.github.com/repos/${REPO}/releases?per_page=100" \
+		| grep '"tag_name"' \
+		| sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+	[ -n "$tags" ] || return
+	stable="$(printf '%s\n' "$tags" | grep -v -- '-' | sort -V | tail -n1)"
+	if [ -n "$stable" ]; then
+		printf '%s' "$stable"
+	else
+		printf '%s\n' "$tags" | sort -V | tail -n1
+	fi
 }
 
 verify_checksum() {
