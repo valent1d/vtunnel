@@ -1,0 +1,5 @@
+# Serve the installer as a shell script with a short edge cache so pushes
+# propagate quickly.
+/install.sh
+  Content-Type: text/x-shellscript; charset=utf-8
+  Cache-Control: public, max-age=300

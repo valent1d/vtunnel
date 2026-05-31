@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vtunnel — pleasant local tunnels</title>
+<meta name="description" content="vtunnel wraps Cloudflare Tunnel to make local dev tunneling pleasant.">
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0b0f0c; color: #d7e0da;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 2rem;
+  }
+  main { width: 100%; max-width: 640px; }
+  pre.logo { color: #00d787; font-size: clamp(8px, 2.4vw, 15px); line-height: 1.1; margin: 0 0 1rem; }
+  p.tag { color: #8a948d; margin: 0 0 2rem; }
+  h2 { color: #8a948d; font-weight: 600; font-size: .85rem; text-transform: uppercase; letter-spacing: .08em; margin: 1.5rem 0 .5rem; }
+  .cmd {
+    background: #11171300; border: 1px solid #243029; border-radius: 8px;
+    padding: .85rem 1rem; display: flex; align-items: center; gap: .75rem; overflow-x: auto;
+  }
+  .cmd code { color: #57d9ff; white-space: pre; }
+  .cmd .dollar { color: #4a564e; user-select: none; }
+  a { color: #00d787; }
+  footer { margin-top: 2.5rem; color: #4a564e; font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+  <pre class="logo">  _   __________  ___  ___  ________
+ | | / /_  __/ / / / |/ / |/ / __/ /
+ | |/ / / / / /_/ /    /    / _// /__
+ |___/ /_/  \____/_/|_/_/|_/___/____/</pre>
+  <p class="tag">Pleasant local tunnels powered by Cloudflare Tunnel.</p>
+
+  <h2>Install on Linux (or macOS without Homebrew)</h2>
+  <div class="cmd"><span class="dollar">$</span><code>curl -fsSL https://vtunnel.valent1.dev/install.sh | sh</code></div>
+
+  <h2>Install on macOS (Homebrew)</h2>
+  <div class="cmd"><span class="dollar">$</span><code>brew install valent1d/vtunnel/vtunnel</code></div>
+
+  <h2>Then</h2>
+  <div class="cmd"><span class="dollar">$</span><code>vtunnel onboarding</code></div>
+
+  <footer>
+    <a href="https://github.com/valent1d/vtunnel">github.com/valent1d/vtunnel</a>
+  </footer>
+</main>
+</body>
+</html>

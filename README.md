@@ -50,7 +50,7 @@ brew install valent1d/vtunnel/vtunnel
 On **Linux** (or macOS without Homebrew), use the install script — it detects your OS/arch, verifies the checksum, and installs the binary:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/valent1d/vtunnel/develop/install.sh | sh
+curl -fsSL https://vtunnel.valent1.dev/install.sh | sh
 ```
 
 (vtunnel needs `cloudflared` installed too — `brew install cloudflared` on macOS, or your distro's package / [Cloudflare's downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) on Linux.)
