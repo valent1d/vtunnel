@@ -5,6 +5,9 @@
   "name": "vtunnel-website",
   "compatibility_date": "2025-09-01",
   "assets": {
-    "directory": "./site"
-  }
+    "directory": "./site",
+  },
+  "observability": {
+    "enabled": true,
+  },
 }
