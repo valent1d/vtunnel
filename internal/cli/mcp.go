@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"vtunnel/internal/api"
+	cfapi "vtunnel/internal/cloudflare"
 	"vtunnel/internal/config"
 	"vtunnel/internal/requestlog"
 	"vtunnel/internal/routes"
@@ -82,6 +83,24 @@ func buildMCPServer(configPath string) *mcp.Server {
 		Description: "Remove a tunnel by hostname or subdomain. Also tears down its Cloudflare Access protection if it had any.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in stopIn) (*mcp.CallToolResult, stopOut, error) {
 		out, err := svc.stopTunnel(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "protect_tunnel",
+		Description: "Put a Cloudflare Access login in front of an existing tunnel (Zero Trust). " +
+			"Use mode=otp (email one-time PIN, the default) with allow=[emails/@domains], or mode=sso with an idp. " +
+			"Requires a Cloudflare token with Access write scope.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in protectIn) (*mcp.CallToolResult, protectOut, error) {
+		out, err := svc.protectTunnel(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "unprotect_tunnel",
+		Description: "Remove Cloudflare Access protection from a tunnel, making it public again (anyone with the URL can reach it).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in unprotectIn) (*mcp.CallToolResult, unprotectOut, error) {
+		out, err := svc.unprotectTunnel(ctx, in)
 		return nil, out, err
 	})
 
@@ -285,6 +304,119 @@ func teardownAccessForMCP(ctx context.Context, info *routes.AccessInfo) error {
 		return err
 	}
 	return unprotectHostname(ctx, client, accountID, info)
+}
+
+// --- protect_tunnel / unprotect_tunnel ---
+
+type protectIn struct {
+	Hostname string   `json:"hostname" jsonschema:"the tunnel hostname or subdomain to protect"`
+	Mode     string   `json:"mode,omitempty" jsonschema:"login method: otp (email one-time PIN, default) or sso"`
+	Allow    []string `json:"allow,omitempty" jsonschema:"who may sign in: emails or @domains (required for otp; optional for sso)"`
+	IdP      string   `json:"idp,omitempty" jsonschema:"identity provider name for mode=sso"`
+	Session  string   `json:"session,omitempty" jsonschema:"Access session duration, e.g. 24h (default 24h)"`
+	Force    bool     `json:"force,omitempty" jsonschema:"allow risky choices such as allow=everyone"`
+}
+
+type protectOut struct {
+	Hostname  string   `json:"hostname"`
+	Protected bool     `json:"protected"`
+	Mode      string   `json:"mode"`
+	Allow     []string `json:"allow,omitempty"`
+	IdP       string   `json:"idp,omitempty"`
+	Note      string   `json:"note"`
+}
+
+type unprotectIn struct {
+	Hostname string `json:"hostname" jsonschema:"the tunnel hostname or subdomain to make public again"`
+}
+
+type unprotectOut struct {
+	Hostname  string `json:"hostname"`
+	Protected bool   `json:"protected"`
+	Note      string `json:"note"`
+}
+
+func (s mcpService) protectTunnel(ctx context.Context, in protectIn) (protectOut, error) {
+	cfg, err := s.config()
+	if err != nil {
+		return protectOut{}, err
+	}
+	hostname, err := hostnameForStop(strings.TrimSpace(in.Hostname), cfg)
+	if err != nil {
+		return protectOut{}, err
+	}
+	route, ok := findRoute(ctx, cfg, hostname)
+	if !ok {
+		return protectOut{}, fmt.Errorf("no tunnel %s — create it first with create_http_tunnel", hostname)
+	}
+
+	client, _, err := newCloudflareClientFromKeychain()
+	if errors.Is(err, cfapi.ErrMissingToken) {
+		return protectOut{}, errAccessWriteScope
+	}
+	if err != nil {
+		return protectOut{}, err
+	}
+	accountID, err := resolveAccountID(ctx, client)
+	if err != nil {
+		return protectOut{}, err
+	}
+	if status := cfapi.DetectAccess(ctx, client, accountID); status.State != cfapi.AccessReady {
+		if status.State == cfapi.AccessTokenUnscoped {
+			return protectOut{}, errAccessWriteScope
+		}
+		return protectOut{}, errors.New("Zero Trust is not enabled — run `vtunnel access setup` first")
+	}
+
+	info, err := protectHostname(ctx, client, accountID, hostname, protectOptions{
+		Mode: in.Mode, Allow: in.Allow, IdP: in.IdP, Session: in.Session, Force: in.Force,
+	})
+	if err != nil {
+		return protectOut{}, err
+	}
+	route.Access = info
+	if err := api.New(cfg).AddRoute(ctx, route); err != nil {
+		return protectOut{}, err
+	}
+	return protectOut{
+		Hostname:  hostname,
+		Protected: true,
+		Mode:      info.Mode,
+		Allow:     info.Allow,
+		IdP:       info.IdP,
+		Note:      "a Cloudflare Access login now guards https://" + hostname,
+	}, nil
+}
+
+func (s mcpService) unprotectTunnel(ctx context.Context, in unprotectIn) (unprotectOut, error) {
+	cfg, err := s.config()
+	if err != nil {
+		return unprotectOut{}, err
+	}
+	hostname, err := hostnameForStop(strings.TrimSpace(in.Hostname), cfg)
+	if err != nil {
+		return unprotectOut{}, err
+	}
+	route, ok := findRoute(ctx, cfg, hostname)
+	if !ok || route.Access == nil {
+		return unprotectOut{Hostname: hostname, Protected: false, Note: "tunnel is not protected"}, nil
+	}
+	client, _, err := newCloudflareClientFromKeychain()
+	if err != nil {
+		return unprotectOut{}, err
+	}
+	accountID, err := resolveAccountID(ctx, client)
+	if err != nil {
+		return unprotectOut{}, err
+	}
+	if err := unprotectHostname(ctx, client, accountID, route.Access); err != nil {
+		return unprotectOut{}, err
+	}
+	route.Access = nil
+	if err := api.New(cfg).AddRoute(ctx, route); err != nil {
+		return unprotectOut{}, err
+	}
+	return unprotectOut{Hostname: hostname, Protected: false, Note: "https://" + hostname + " is now PUBLIC"}, nil
 }
 
 // --- inspect_requests ---

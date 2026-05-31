@@ -76,7 +76,7 @@ func TestMCPExposesTools(t *testing.T) {
 	}
 	sort.Strings(names)
 
-	want := []string{"create_http_tunnel", "inspect_requests", "list_tunnels", "replay_request", "stop_tunnel"}
+	want := []string{"create_http_tunnel", "inspect_requests", "list_tunnels", "protect_tunnel", "replay_request", "stop_tunnel", "unprotect_tunnel"}
 	if len(names) != len(want) {
 		t.Fatalf("tools = %v, want %v", names, want)
 	}

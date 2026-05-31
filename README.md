@@ -218,6 +218,8 @@ claude mcp add vtunnel -- vtunnel mcp
 | `create_http_tunnel` | Create a **public** HTTPS tunnel to a local port and return its URL — ideal for webhooks. |
 | `list_tunnels` | List active tunnels (hostname, URL, target, whether Access-protected). |
 | `stop_tunnel` | Remove a tunnel (and tear down its Access protection, if any). |
+| `protect_tunnel` | Put a Cloudflare Access login in front of a tunnel (email OTP or SSO). |
+| `unprotect_tunnel` | Remove Access protection, making the tunnel public again. |
 | `inspect_requests` | List recent captured requests, or fetch one in full (headers + body) — for debugging payloads. |
 | `replay_request` | Re-issue a captured request to your upstream (replay a webhook while you fix the handler). |
 
