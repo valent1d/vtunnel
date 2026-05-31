@@ -903,7 +903,7 @@ var (
 	cmdSSH            = Command{Invocation: "vtunnel ssh", Description: "Open SSH in the browser (zero-install)"}
 	cmdOrbstack       = Command{Invocation: "vtunnel orbstack", Description: "Expose OrbStack containers"}
 	cmdAccess         = Command{Invocation: "vtunnel access", Description: "Protect routes with a login (Zero Trust)"}
-	cmdMCP            = Command{Invocation: "vtunnel mcp", Description: "Run as an MCP server for AI agents"}
+	cmdMCP            = Command{Invocation: "vtunnel mcp", Description: "Connect vtunnel to AI agents (Claude Code, Cursor…)"}
 	cmdList           = Command{Invocation: "vtunnel list", Description: "List active routes"}
 	cmdLogs           = Command{Invocation: "vtunnel logs dev", Description: "Show request logs"}
 	cmdServiceInstall = Command{Invocation: "vtunnel service install", Description: "Start vtunnel automatically at login"}

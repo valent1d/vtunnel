@@ -205,13 +205,21 @@ vtunnel ssh rm box                                # remove one (also deletes its
 
 vtunnel ships a built-in **Model Context Protocol** server, so an AI agent can create and inspect tunnels for you — e.g. *"spin up a public URL for my Stripe webhook and show me what Stripe sends."*
 
-Add it to Claude Code:
+### Connect it to your editor/agent
+
+Run **`vtunnel mcp`** to open a dashboard that registers vtunnel in your AI clients, shows which are configured, and lets you add/remove it and verify it works:
 
 ```bash
-claude mcp add vtunnel -- vtunnel mcp
+vtunnel mcp                     # dashboard: add/remove per client, self-check
+vtunnel mcp add                 # register in every installed client (non-interactive)
+vtunnel mcp add cursor codex    # …or specific ones
+vtunnel mcp status --check      # who's configured + launch the server to confirm it responds
+vtunnel mcp remove cursor       # unregister
 ```
 
-(Or, for any MCP client, run `vtunnel mcp` as a stdio server.) It exposes:
+Supported clients (each stored in its own place/format, handled for you): **Claude Code, Cursor, VS Code, Codex, OpenCode, Antigravity**. Registration defaults to **user/global** scope; pass `--scope project` to write into the current repo instead. The dashboard's detail pane also shows the exact file path + snippet (or CLI command) if you'd rather set it up by hand.
+
+Under the hood each client is pointed at `vtunnel mcp serve` (the stdio server). It exposes:
 
 | Tool | What it does |
 |------|--------------|
@@ -225,7 +233,7 @@ claude mcp add vtunnel -- vtunnel mcp
 
 It also publishes a `vtunnel://requests` resource (recent captured requests as JSON).
 
-> **Heads-up:** `create_http_tunnel` makes a **public** URL — anyone with the link can reach the local service. That's what you want for a webhook; for anything else, protect it with `vtunnel access protect` or the dashboard. vtunnel must already be set up (a tunnel + domain); the MCP server starts cloudflared and the daemon as needed.
+> **Heads-up:** `create_http_tunnel` makes a **public** URL — anyone with the link can reach the local service. That's what you want for a webhook; for anything else, protect it with `protect_tunnel`, `vtunnel access protect`, or the dashboard. vtunnel must already be set up (a tunnel + domain); the MCP server starts cloudflared and the daemon as needed.
 
 ## One-time setup
 

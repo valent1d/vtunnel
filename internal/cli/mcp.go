@@ -19,21 +19,48 @@ import (
 	"vtunnel/internal/routes"
 )
 
-// newMCPCommand runs vtunnel as a Model Context Protocol server over stdio, so
-// an MCP client (Claude Code, Claude Desktop, …) can manage tunnels on the
-// user's behalf — e.g. spin up a public URL for a webhook and read the requests
-// that arrive.
+// newMCPCommand is the parent for vtunnel's Model Context Protocol surface:
+// `serve` runs the stdio server that AI clients launch, while add/remove/status
+// (and the bare interactive form) register the server into those clients and
+// report their setup. Bare `vtunnel mcp` opens the management dashboard.
 func newMCPCommand(configPath *string) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Run vtunnel as an MCP server for AI agents (Claude Code, …)",
-		Long: "Expose vtunnel over the Model Context Protocol on stdio, so an MCP client\n" +
-			"(Claude Code, Claude Desktop, …) can create and inspect tunnels — e.g. spin\n" +
-			"up a public URL for a webhook and read the requests that arrive.\n\n" +
-			"Add it to Claude Code with:\n" +
-			"  claude mcp add vtunnel -- vtunnel mcp\n\n" +
-			"Tools: list_tunnels, create_http_tunnel, stop_tunnel, inspect_requests,\n" +
-			"replay_request. Resource: vtunnel://requests (recent captured requests).",
+		Short: "Manage the vtunnel MCP server for AI agents (Claude Code, Cursor, …)",
+		Long: "vtunnel ships a Model Context Protocol server so AI clients can create and\n" +
+			"inspect tunnels — e.g. spin up a public URL for a webhook and read the\n" +
+			"requests that arrive.\n\n" +
+			"Run with no arguments to open the management dashboard (add/remove the\n" +
+			"server in Claude Code, Cursor, VS Code, Codex, OpenCode, Antigravity and\n" +
+			"check that it works). `vtunnel mcp serve` is the server itself, launched\n" +
+			"by the clients.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if interactiveTerminal() {
+				return runMCPSetupTUI(cmd.Context())
+			}
+			return runMCPStatus(cmd.Context(), cmd.OutOrStdout(), mcpStatusOptions{})
+		},
+	}
+	cmd.AddCommand(
+		newMCPServeCommand(configPath),
+		newMCPAddCommand(),
+		newMCPRemoveCommand(),
+		newMCPStatusCommand(),
+	)
+	return cmd
+}
+
+// newMCPServeCommand runs vtunnel as an MCP server over stdio. MCP clients are
+// configured to launch this; you normally don't run it by hand.
+func newMCPServeCommand(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "serve",
+		Short: "Run the MCP server over stdio (launched by MCP clients)",
+		Long: "Run vtunnel as a Model Context Protocol server on stdio.\n\n" +
+			"Tools: list_tunnels, create_http_tunnel, stop_tunnel, protect_tunnel,\n" +
+			"unprotect_tunnel, inspect_requests, replay_request. Resource:\n" +
+			"vtunnel://requests (recent captured requests).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runMCPServer(cmd.Context(), *configPath)
