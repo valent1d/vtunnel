@@ -899,6 +899,11 @@ func completionPhase(s snapshot) Phase {
 var (
 	cmdOnboarding     = Command{Invocation: "vtunnel onboarding", Description: "Guided first-run setup"}
 	cmdDashboard      = Command{Invocation: "vtunnel http", Description: "Open the request dashboard"}
+	cmdTCP            = Command{Invocation: "vtunnel tcp", Description: "Expose a TCP service (Postgres, Redis, …)"}
+	cmdSSH            = Command{Invocation: "vtunnel ssh", Description: "Open SSH in the browser (zero-install)"}
+	cmdOrbstack       = Command{Invocation: "vtunnel orbstack", Description: "Expose OrbStack containers"}
+	cmdAccess         = Command{Invocation: "vtunnel access", Description: "Protect routes with a login (Zero Trust)"}
+	cmdMCP            = Command{Invocation: "vtunnel mcp", Description: "Run as an MCP server for AI agents"}
 	cmdList           = Command{Invocation: "vtunnel list", Description: "List active routes"}
 	cmdLogs           = Command{Invocation: "vtunnel logs dev", Description: "Show request logs"}
 	cmdServiceInstall = Command{Invocation: "vtunnel service install", Description: "Start vtunnel automatically at login"}
@@ -924,6 +929,11 @@ func CommandReference(defaultDomain string) []Command {
 		cmdOnboarding,
 		cmdDashboard,
 		exposeCommand(defaultDomain),
+		cmdTCP,
+		cmdSSH,
+		cmdOrbstack,
+		cmdAccess,
+		cmdMCP,
 		cmdList,
 		cmdLogs,
 		cmdServiceInstall,
@@ -937,6 +947,10 @@ func CompletionCommands(defaultDomain string) []Command {
 	return []Command{
 		exposeCommand(defaultDomain),
 		cmdDashboard,
+		cmdTCP,
+		cmdSSH,
+		cmdAccess,
+		cmdMCP,
 		cmdList,
 		cmdLogs,
 		cmdHelp,
